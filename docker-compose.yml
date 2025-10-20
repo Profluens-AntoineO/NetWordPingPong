@@ -5,6 +5,14 @@ services:
     ports:
       # Mappe le port 5000 du conteneur au port 5000 de la machine hôte
       - "5000:5000"
+    environment:
+      # ====================================================================
+      # MODIFICATION MANUELLE REQUISE
+      # Remplacez "localhost" par l'adresse IP de votre machine
+      # sur le réseau local (ex: 192.168.1.50).
+      # ====================================================================
+      - OWN_HOST=192.168.1.140
+      - OWN_PORT=5000
     networks:
       - pong-net
 
