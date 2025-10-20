@@ -1,0 +1,25 @@
+services:
+  # Service Backend (Python/Flask)
+  backend:
+    build: ./backend
+    ports:
+      # Mappe le port 5000 du conteneur au port 5000 de la machine hôte
+      - "5000:5000"
+    networks:
+      - pong-net
+
+  # Service Frontend (Nginx)
+  frontend:
+    build: ./frontend
+    ports:
+      # Mappe le port 80 du conteneur au port 8080 de la machine hôte
+      # On utilise 8080 pour éviter les conflits si un autre service utilise le port 80
+      - "8080:80"
+    depends_on:
+      - backend # S'assure que le backend est démarré avant le frontend
+    networks:
+      - pong-net
+
+networks:
+  pong-net:
+    driver: bridge
