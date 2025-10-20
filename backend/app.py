@@ -189,7 +189,7 @@ def receive_ball(payload: BallPayload):
         game_state["turn_counts"].update(payload.incomingTurnCounts)
         logging.info(f"Nouveau tour commencé. Mot: '{game_state['current_word']}'. Démarrage du minuteur de 5s.")
 
-        game_state["game_timer"] = threading.Timer(5.0, handle_loss)
+        game_state["game_timer"] = threading.Timer(10.0, handle_loss)
         game_state["game_timer"].start()
     return {"message": "Balle reçue."}
 
@@ -214,7 +214,7 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
         logging.info("Validation du mot réussie.")
 
         if game_state.get("game_timer"):
-            logging.debug("Annulation du minuteur de 5s.")
+            logging.debug("Annulation du minuteur de 10s.")
             game_state["game_timer"].cancel()
 
         # --- Sélection du joueur ---

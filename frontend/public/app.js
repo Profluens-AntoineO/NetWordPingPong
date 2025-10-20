@@ -63,7 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
         wordInput.focus();
         startButton.style.display = 'none';
 
-        let timeLeft = 5;
+        let timeLeft = 10;
         timerDisplayEl.textContent = `Temps restant : ${timeLeft}s`;
 
         if (countdownInterval) clearInterval(countdownInterval);
