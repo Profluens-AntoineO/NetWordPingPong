@@ -28,9 +28,11 @@ document.addEventListener('DOMContentLoaded', () => {
         wordDisplayEl.textContent = '';
         wordInput.value = '';
         wordInput.disabled = true;
-        sendButton.disabled = true;
-        restartButton.style.display = 'none';
-        startButton.style.display = 'block';
+
+        sendButton.classList.add('hidden');
+        restartButton.classList.add('hidden');
+        startButton.classList.remove('hidden'); // Afficher le bouton "Commencer"
+
         statusEl.textContent = "Prêt à jouer. Cliquez sur 'Commencer' ou attendez la balle.";
         currentWord = null;
         if (gameTimer) clearTimeout(gameTimer);
@@ -45,9 +47,10 @@ document.addEventListener('DOMContentLoaded', () => {
         clearTimeout(gameTimer);
         statusEl.textContent = "Trop tard ! Vous avez perdu.";
         wordInput.disabled = true;
-        sendButton.disabled = true;
-        startButton.style.display = 'none';
-        restartButton.style.display = 'block';
+
+        sendButton.classList.add('hidden');
+        startButton.classList.add('hidden');
+        restartButton.classList.remove('hidden'); // Afficher le bouton "Recommencer"
     }
 
     function startTurn(word) {
@@ -59,9 +62,12 @@ document.addEventListener('DOMContentLoaded', () => {
         statusEl.textContent = "À vous de jouer !";
         wordDisplayEl.textContent = word;
         wordInput.disabled = false;
-        sendButton.disabled = false;
         wordInput.focus();
-        startButton.style.display = 'none';
+
+        startButton.classList.add('hidden');
+        restartButton.classList.add('hidden');
+        sendButton.classList.remove('hidden'); // Afficher le bouton "Renvoyer"
+        sendButton.disabled = false;
 
         let timeLeft = 10;
         timerDisplayEl.textContent = `Temps restant : ${timeLeft}s`;
@@ -80,23 +86,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function passBall() {
         console.log('[passBall] Tentative de soumission déclenchée.');
-
         const newWord = wordInput.value.trim().toLowerCase();
+        const expectedPattern = new RegExp(`^${currentWord}[a-z]$`);
 
-        // --- LOGS DE COMPARAISON ---
-        console.log(`[passBall] Mot soumis par l'utilisateur : "${newWord}"`);
-        console.log(`[passBall] Mot de base attendu (currentWord) : "${currentWord}"`);
-        console.log(`[passBall] Test de la condition: Le mot "${newWord}" correspond-il au à ${currentWord} ? -> ${currentWord === newWord}`);
-        // --- FIN DES LOGS DE COMPARAISON ---
-
-        if (newWord.startsWith(currentWord) && newWord.length !== currentWord.length + 1) {
+        console.log(`[passBall] Mot soumis: "${newWord}", Mot attendu: "${currentWord}"`);
+        if (!expectedPattern.test(newWord)) {
             statusEl.textContent = "Mot incorrect ! Réessayez.";
-            console.error('[passBall] ÉCHEC de la validation locale : le mot soumis ne correspond pas au format attendu.');
+            console.error('[passBall] ÉCHEC de la validation locale.');
             return;
         }
 
         console.log('%c[passBall] SUCCÈS de la validation locale.', 'color: lightgreen;');
-
         clearTimeout(gameTimer);
         if (countdownInterval) clearInterval(countdownInterval);
         timerDisplayEl.textContent = '';
@@ -105,7 +105,7 @@ document.addEventListener('DOMContentLoaded', () => {
         statusEl.textContent = "Envoi en cours...";
 
         try {
-            console.log(`[passBall] Envoi de la requête POST à ${backendBaseUrl}/api/pass-ball avec le payload: { "newWord": "${newWord}" }`);
+            console.log(`[passBall] Envoi de la requête POST à ${backendBaseUrl}/api/pass-ball`);
             const response = await fetch(`${backendBaseUrl}/api/pass-ball`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -123,7 +123,7 @@ document.addEventListener('DOMContentLoaded', () => {
             startPolling();
         } catch (error) {
             statusEl.textContent = error.message;
-            console.error('[passBall] Erreur dans le bloc try/catch de la requête fetch:', error);
+            console.error('[passBall] Erreur dans le bloc try/catch:', error);
             wordInput.disabled = false;
             sendButton.disabled = false;
         }
@@ -133,15 +133,12 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${backendBaseUrl}/api/get-ball`);
             const data = await response.json();
-
             if (data && data.word && data.word !== currentWord) {
                 console.log(`[checkForBall] Nouvelle balle détectée ! Mot reçu : "${data.word}"`);
                 startTurn(data.word);
             }
         } catch (error) {
-            console.error("[checkForBall] Erreur de polling:", error);
-            statusEl.textContent = "Erreur de connexion au serveur.";
-            if (pollingInterval) clearInterval(pollingInterval);
+            // On évite de spammer la console pour les erreurs de polling
         }
     }
 
@@ -152,20 +149,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function discoverAndRegister() {
         try {
-            console.log('[discoverAndRegister] Lancement de la découverte côté serveur...');
-            statusEl.textContent = "Recherche d'autres joueurs sur le réseau...";
+            console.log('[discoverAndRegister] Lancement de la découverte...');
+            statusEl.textContent = "Recherche d'autres joueurs...";
             await fetch(`${backendBaseUrl}/api/discover`, { method: 'POST' });
         } catch (error) {
-            statusEl.textContent = "Impossible de contacter le serveur pour la découverte.";
+            statusEl.textContent = "Impossible de contacter le serveur.";
             console.error('[discoverAndRegister] Erreur:', error);
         }
     }
 
     // --- Initialisation ---
-    sendButton.addEventListener('click', passBall);
     startButton.addEventListener('click', () => {
         console.log('[startButton] Clic sur "Commencer la partie".');
-        // On passe l'objet backgroundTasks vide, car il n'est utilisé que côté serveur
+        statusEl.textContent = "Démarrage de la partie...";
+        startButton.disabled = true; // Empêcher les double-clics
         fetch(`${backendBaseUrl}/api/start-game`, { method: 'POST' })
             .then(response => {
                 if (!response.ok) {
@@ -176,16 +173,17 @@ document.addEventListener('DOMContentLoaded', () => {
             })
             .catch(error => {
                 statusEl.textContent = error.message;
-                console.error('[startButton] Erreur lors du démarrage de la partie:', error);
+                console.error('[startButton] Erreur:', error);
+            })
+            .finally(() => {
+                startButton.disabled = false; // Réactiver le bouton
             });
     });
 
+    sendButton.addEventListener('click', passBall);
     wordInput.addEventListener('keyup', (event) => {
-        if (event.key === 'Enter' && !sendButton.disabled) {
-            passBall();
-        }
+        if (event.key === 'Enter' && !sendButton.disabled) passBall();
     });
-
     restartButton.addEventListener('click', () => {
         console.log('[restartButton] Clic sur "Recommencer".');
         resetUI();
