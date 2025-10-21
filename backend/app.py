@@ -67,7 +67,6 @@ def reset_local_game_state():
             game_state["game_timer"].cancel()
         game_state["current_word"] = None
         game_state["game_timer"] = None
-        # On réinitialise aussi la liste des joueurs prêts
         game_state["ready_players"] = []
 
 def broadcast(endpoint: str, payload: dict):
@@ -125,9 +124,7 @@ def register_back(player_identifier: str):
 
 # --- Logique de Démarrage du Jeu ---
 def start_game_logic(background_tasks: BackgroundTasks):
-    """Contient la logique pour démarrer une partie, appelée quand tout le monde est prêt."""
     with state_lock:
-        # Double vérification pour éviter les démarrages multiples
         if game_state.get("current_word") is not None:
             logging.warning("Tentative de démarrage d'une partie déjà en cours. Annulation.")
             return
@@ -151,11 +148,8 @@ def start_game_logic(background_tasks: BackgroundTasks):
             incomingTurnCounts=game_state["turn_counts"],
             incomingReadyPlayers=game_state["ready_players"]
         )
-
-        # Marquer le début du jeu
         game_state["current_word"] = "game_starting"
 
-    # On sort du verrou pour les appels réseau
     if first_player_identifier == game_state["own_identifier"]:
         receive_ball(payload_to_send)
     else:
@@ -220,10 +214,13 @@ def get_players():
             "ready_players": list(game_state.get("ready_players", []))
         }
 
+# --- ENDPOINT QUI MANQUAIT ---
 @app.post("/api/register")
 def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
+    """Enregistre un joueur et lance un handshake en retour si c'est un nouveau joueur."""
     with state_lock:
         is_new_player = payload.ip and payload.ip not in game_state["players"]
+
         if is_new_player:
             logging.info(f"NOUVEAU JOUEUR TROUVÉ ET AJOUTÉ: {payload.ip}")
             game_state["players"].append(payload.ip)
@@ -246,16 +243,13 @@ def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
 
 @app.post("/api/ready")
 def im_ready(background_tasks: BackgroundTasks):
-    """Le joueur se déclare prêt à jouer."""
     with state_lock:
         my_id = game_state["own_identifier"]
         if my_id not in game_state["ready_players"]:
             logging.info(f"Le joueur {my_id} est maintenant prêt.")
             game_state["ready_players"].append(my_id)
-            # Notifier les autres qu'on est prêt
             broadcast('/api/notify-ready', {"player_id": my_id})
 
-        # Vérifier si tout le monde est prêt
         known_players = set(game_state["players"])
         ready_players = set(game_state["ready_players"])
         if known_players == ready_players and len(known_players) > 0 and game_state.get("current_word") is None:
@@ -265,14 +259,12 @@ def im_ready(background_tasks: BackgroundTasks):
 
 @app.post("/api/notify-ready")
 def notify_ready(payload: ReadyPayload, background_tasks: BackgroundTasks):
-    """Reçoit une notification qu'un autre joueur est prêt."""
     with state_lock:
         player_id = payload.player_id
         if player_id not in game_state["ready_players"]:
             logging.info(f"Notification: Le joueur {player_id} est maintenant prêt.")
             game_state["ready_players"].append(player_id)
 
-        # Vérifier si tout le monde est prêt
         known_players = set(game_state["players"])
         ready_players = set(game_state["ready_players"])
         if known_players == ready_players and len(known_players) > 0 and game_state.get("current_word") is None:
@@ -311,16 +303,13 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
         other_players = [p_id for p_id in game_state["players"] if p_id != game_state["own_identifier"]]
 
         next_player_identifier = None
-        # --- Logique de sélection ---
         if other_players:
-            # Mode multijoueur: choisir un autre joueur
             candidates = list(other_players)
             while candidates:
                 min_turns = min(game_state["turn_counts"].get(p, 0) for p in candidates)
                 eligible_players = [p for p in candidates if game_state["turn_counts"].get(p, 0) == min_turns]
                 potential_next_player = random.choice(eligible_players)
 
-                # Health check
                 try:
                     requests.get(f"http://{potential_next_player}/health", timeout=0.5)
                     next_player_identifier = potential_next_player
@@ -333,14 +322,10 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
             if not next_player_identifier:
                 logging.error("Aucun autre joueur n'a répondu au health check. Passage en mode solo pour ce tour.")
                 next_player_identifier = game_state["own_identifier"]
-
         else:
-            # Mode solo
             next_player_identifier = game_state["own_identifier"]
 
-        # --- Logique d'envoi ---
         if next_player_identifier != game_state["own_identifier"]:
-            # Envoi à un autre joueur
             game_state["turn_counts"][next_player_identifier] += 1
             next_payload = BallPayload(
                 word=payload.newWord,
@@ -351,7 +336,6 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
             reset_local_game_state()
             background_tasks.add_task(send_ball_in_background, next_player_identifier, next_payload.dict())
         else:
-            # Envoi à soi-même (mode solo ou fallback)
             simulated_word = payload.newWord + random.choice('abcdefghijklmnopqrstuvwxyz')
             logging.info(f"Mode solo/fallback: L'IA répond avec '{simulated_word}'.")
             game_state["turn_counts"][game_state["own_identifier"]] += 1
@@ -365,9 +349,6 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
             receive_ball(next_payload)
 
     return {"message": "Balle passée avec succès."}
-
-# On supprime l'ancien endpoint /api/start-game qui n'est plus utilisé
-# @app.post("/api/start-game") ...
 
 @app.post("/api/game-over")
 def game_over(payload: GameOverPayload):
