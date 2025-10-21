@@ -3,6 +3,7 @@ import os
 import threading
 import random
 import ipaddress
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional
 
@@ -33,20 +34,28 @@ PORT = 5000
 TURN_DURATION = 60.0
 
 # --- Modèles Pydantic ---
+class HistoryEntry(BaseModel):
+    player: str
+    word: str
+    response_time_ms: int
+
 class RegisterPayload(BaseModel):
     ip: str
     initialPlayers: Optional[List[str]] = Field(default_factory=list)
     initialTurnCounts: Optional[Dict[str, int]] = Field(default_factory=dict)
     initialReadyPlayers: Optional[List[str]] = Field(default_factory=list)
+    initialArchive: Optional[List[List[HistoryEntry]]] = Field(default_factory=list)
 
 class ReadyPayload(BaseModel):
     player_id: str
 
 class BallPayload(BaseModel):
     word: str
+    timeout_ms: int
     incomingPlayers: List[str]
     incomingTurnCounts: Dict[str, int]
     incomingReadyPlayers: List[str]
+    incomingHistory: List[HistoryEntry]
 
 class PassBallPayload(BaseModel):
     newWord: str
@@ -61,13 +70,16 @@ state_lock = threading.RLock()
 
 # --- Fonctions Utilitaires ---
 def reset_local_game_state():
-    logging.info("État du jeu local réinitialisé (sauf le dernier perdant).")
+    """Réinitialise l'état pour une nouvelle partie, en conservant l'archive et le dernier perdant."""
+    logging.info("Réinitialisation de l'état du jeu local pour une nouvelle partie.")
     with state_lock:
         if game_state.get("game_timer"):
             game_state["game_timer"].cancel()
         game_state["current_word"] = None
         game_state["game_timer"] = None
         game_state["ready_players"] = []
+        game_state["history"] = []
+        game_state["turn_start_time"] = None
 
 def broadcast(endpoint: str, payload: dict):
     with state_lock:
@@ -84,6 +96,7 @@ def broadcast(endpoint: str, payload: dict):
 def handle_loss():
     logging.warning(f"Le minuteur de {TURN_DURATION} secondes a expiré. Le joueur a perdu.")
     broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': 'Temps écoulé'})
+    # La notification de game-over déclenchera l'archivage et la réinitialisation sur toutes les instances
     reset_local_game_state()
 
 # --- Événement de Démarrage ---
@@ -96,8 +109,10 @@ def on_startup():
         game_state["ready_players"] = []
         game_state["current_word"] = None
         game_state["game_timer"] = None
-        game_state["last_loser"] = None  # <-- On initialise le dernier perdant
-
+        game_state["last_loser"] = None
+        game_state["history"] = []
+        game_state["archive"] = []
+        game_state["turn_start_time"] = None
     logging.info(f"Serveur démarré. Identité: {game_state['own_identifier']}")
 
 # --- Tâches de Fond ---
@@ -115,39 +130,34 @@ def register_back(player_identifier: str):
                 "ip": game_state["own_identifier"],
                 "initialPlayers": game_state["players"],
                 "initialTurnCounts": game_state["turn_counts"],
-                "initialReadyPlayers": game_state["ready_players"]
+                "initialReadyPlayers": game_state["ready_players"],
+                "initialArchive": game_state["archive"]
             }
         requests.post(f"http://{player_identifier}/api/register", json=payload, timeout=1)
     except requests.RequestException:
         pass
 
-# --- Logique de Démarrage du Jeu (MODIFIÉE) ---
+# --- Logique de Démarrage du Jeu ---
 def start_game_logic(background_tasks: BackgroundTasks):
-    """Contient la logique pour démarrer une partie, appelée quand tout le monde est prêt."""
     with state_lock:
         if game_state.get("current_word") is not None:
             return
-
         logging.info("Tous les joueurs sont prêts. Décision du premier joueur...")
 
         ready_players = game_state["ready_players"]
         last_loser = game_state.get("last_loser")
         first_player_identifier = None
 
-        # Priorité 1: Le perdant précédent, s'il est prêt
         if last_loser and last_loser in ready_players:
             first_player_identifier = last_loser
             logging.info(f"Le perdant précédent ({last_loser}) a été choisi pour commencer.")
-
-        # Priorité 2: Choix déterministe et aléatoire
         else:
             if not ready_players: return
-            logging.info("Pas de perdant précédent valide, choix déterministe aléatoire.")
             sorted_players = sorted(ready_players)
             seed_string = "".join(sorted_players)
             player_index = hash(seed_string) % len(sorted_players)
             first_player_identifier = sorted_players[player_index]
-            logging.info(f"Le joueur '{first_player_identifier}' a été choisi par consensus.")
+            logging.info(f"Choix déterministe: Le joueur '{first_player_identifier}' commence.")
 
         start_word = random.choice('abcdefghijklmnopqrstuvwxyz')
         logging.info(f"Premier joueur: {first_player_identifier}, Lettre de départ: '{start_word}'")
@@ -158,9 +168,11 @@ def start_game_logic(background_tasks: BackgroundTasks):
 
         payload_to_send = BallPayload(
             word=start_word,
+            timeout_ms=int(TURN_DURATION * 1000),
             incomingPlayers=game_state["players"],
             incomingTurnCounts=game_state["turn_counts"],
-            incomingReadyPlayers=game_state["ready_players"]
+            incomingReadyPlayers=game_state["ready_players"],
+            incomingHistory=game_state["history"]
         )
         game_state["current_word"] = "game_starting"
 
@@ -186,7 +198,8 @@ def discover_player(ip_to_try: str):
                     "ip": game_state["own_identifier"],
                     "initialPlayers": game_state["players"],
                     "initialTurnCounts": game_state["turn_counts"],
-                    "initialReadyPlayers": game_state["ready_players"]
+                    "initialReadyPlayers": game_state["ready_players"],
+                    "initialArchive": game_state["archive"]
                 }
             response_register = requests.post(f"http://{player_identifier}/api/register", json=payload_register, timeout=0.5)
             if response_register.status_code == 200:
@@ -195,6 +208,7 @@ def discover_player(ip_to_try: str):
                     game_state["players"] = list(set(game_state["players"]).union(set(data.get("allPlayers", []))))
                     game_state["turn_counts"].update(data.get("allTurnCounts", {}))
                     game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(data.get("allReadyPlayers", []))))
+                    game_state["archive"] = data.get("allArchive", []) # Sync archive
     except requests.RequestException:
         pass
 
@@ -225,7 +239,11 @@ def ping_for_discovery():
 @app.get("/api/get-ball")
 def get_ball():
     with state_lock:
-        return {"word": game_state.get("current_word")}
+        return {
+            "word": game_state.get("current_word"),
+            "timeout_ms": game_state.get("current_turn_timeout_ms"),
+            "history": game_state.get("history", [])
+        }
 
 @app.get("/api/players")
 def get_players():
@@ -236,6 +254,11 @@ def get_players():
             "turn_counts": dict(game_state.get("turn_counts", {})),
             "ready_players": list(game_state.get("ready_players", []))
         }
+
+@app.get("/api/archive")
+def get_archive():
+    with state_lock:
+        return {"archive": list(game_state.get("archive", []))}
 
 @app.post("/api/register")
 def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
@@ -252,13 +275,15 @@ def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
         game_state["players"] = list(current_players.union(new_players))
         game_state["turn_counts"].update(payload.initialTurnCounts)
         game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(payload.initialReadyPlayers)))
+        game_state["archive"] = payload.initialArchive
 
         return {
             "message": "Enregistré",
             "identity": game_state["own_identifier"],
             "allPlayers": game_state["players"],
             "allTurnCounts": game_state["turn_counts"],
-            "allReadyPlayers": game_state["ready_players"]
+            "allReadyPlayers": game_state["ready_players"],
+            "allArchive": game_state["archive"]
         }
 
 @app.post("/api/ready")
@@ -300,8 +325,14 @@ def receive_ball(payload: BallPayload):
         game_state["players"] = list(set(game_state["players"]).union(set(payload.incomingPlayers)))
         game_state["turn_counts"].update(payload.incomingTurnCounts)
         game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(payload.incomingReadyPlayers)))
+        game_state["history"] = payload.incomingHistory
 
-        game_state["game_timer"] = threading.Timer(TURN_DURATION, handle_loss)
+        game_state["turn_start_time"] = time.time()
+        game_state["current_turn_timeout_ms"] = payload.timeout_ms
+
+        logging.info(f"Nouveau tour. Mot: '{payload.word}'. Timeout: {payload.timeout_ms}ms.")
+
+        game_state["game_timer"] = threading.Timer(payload.timeout_ms / 1000.0, handle_loss)
         game_state["game_timer"].start()
     return {"message": "Balle reçue."}
 
@@ -309,6 +340,8 @@ def receive_ball(payload: BallPayload):
 def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
     with state_lock:
         current_word = game_state.get("current_word")
+        start_time = game_state.get("turn_start_time")
+
         if current_word is None:
             raise HTTPException(status_code=408, detail="Temps écoulé côté serveur.")
         if not payload.newWord.startswith(current_word) or len(payload.newWord) != len(current_word) + 1:
@@ -316,6 +349,14 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
 
         if game_state.get("game_timer"):
             game_state["game_timer"].cancel()
+
+        response_time_ms = int((time.time() - start_time) * 1000) if start_time else 0
+        history_entry = HistoryEntry(
+            player=game_state["own_identifier"],
+            word=payload.newWord,
+            response_time_ms=response_time_ms
+        )
+        game_state["history"].append(history_entry)
 
         other_players = [p_id for p_id in game_state["players"] if p_id != game_state["own_identifier"]]
 
@@ -343,9 +384,11 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
             game_state["turn_counts"][next_player_identifier] += 1
             next_payload = BallPayload(
                 word=payload.newWord,
+                timeout_ms=int(TURN_DURATION * 1000),
                 incomingPlayers=game_state["players"],
                 incomingTurnCounts=game_state["turn_counts"],
-                incomingReadyPlayers=game_state["ready_players"]
+                incomingReadyPlayers=game_state["ready_players"],
+                incomingHistory=game_state["history"]
             )
             reset_local_game_state()
             background_tasks.add_task(send_ball_in_background, next_player_identifier, next_payload.dict())
@@ -354,21 +397,26 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
             game_state["turn_counts"][game_state["own_identifier"]] += 1
             next_payload = BallPayload(
                 word=simulated_word,
+                timeout_ms=int(TURN_DURATION * 1000),
                 incomingPlayers=game_state["players"],
                 incomingTurnCounts=game_state["turn_counts"],
-                incomingReadyPlayers=game_state["ready_players"]
+                incomingReadyPlayers=game_state["ready_players"],
+                incomingHistory=game_state["history"]
             )
             reset_local_game_state()
             receive_ball(next_payload)
 
     return {"message": "Balle passée avec succès."}
 
-# --- MODIFICATION: L'endpoint game-over mémorise le perdant ---
 @app.post("/api/game-over")
 def game_over(payload: GameOverPayload):
     logging.info(f"Notification de fin de partie reçue. Perdant: {payload.loser}, Raison: {payload.reason}")
     with state_lock:
         game_state["last_loser"] = payload.loser
+        if game_state.get("history"):
+            logging.info(f"Archivage de la partie terminée avec {len(game_state['history'])} coups.")
+            game_state["archive"].append(list(game_state["history"]))
+
     reset_local_game_state()
     return {"message": "OK"}
 

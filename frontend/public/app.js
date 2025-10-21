@@ -224,8 +224,54 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function startPlayerListPolling() {
         if (playerListInterval) clearInterval(playerListInterval);
-        updatePlayerList();
-        playerListInterval = setInterval(updatePlayerList, 1000);
+
+        const updateAllStatus = () => {
+            updatePlayerList();
+            // On ajoute la mise à jour de l'archive ici
+            fetch(`${backendBaseUrl}/api/archive`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.archive) {
+                        updateArchiveList(data.archive);
+                    }
+                })
+                .catch(() => {}); // Silence pour les erreurs de polling
+        };
+
+        updateAllStatus();
+        playerListInterval = setInterval(updateAllStatus, 2000); // On peut ralentir ce polling
+    }
+    function updateArchiveList(archive) {
+        archiveListEl.innerHTML = '';
+        if (archive && archive.length > 0) {
+            archive.forEach((gameHistory, index) => {
+                const gameContainer = document.createElement('div');
+                const gameTitle = document.createElement('h3');
+                gameTitle.textContent = `Partie ${index + 1}`;
+                gameTitle.className = 'font-bold text-slate-200';
+                gameContainer.appendChild(gameTitle);
+
+                const gameUl = document.createElement('ul');
+                gameUl.className = 'pl-4 text-sm';
+
+                gameHistory.forEach(entry => {
+                    const li = document.createElement('li');
+                    li.innerHTML = `
+                        <span class="font-mono">${entry.word}</span>
+                        <span class="text-slate-500"> par </span>
+                        <span class="font-semibold">${entry.player}</span>
+                        <span class="text-slate-500"> en </span>
+                        <span class="text-cyan-400">${entry.response_time_ms} ms</span>
+                    `;
+                    gameUl.appendChild(li);
+                });
+
+                gameContainer.appendChild(gameUl);
+                archiveListEl.appendChild(gameContainer);
+            });
+        } else {
+            archiveListEl.innerHTML = '<span>Aucune partie archivée.</span>';
+        }
     }
 
     async function discoverAndRegister() {
@@ -274,7 +320,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (event.key === 'Enter' && !sendButton.disabled) passBall();
     });
     restartButton.addEventListener('click', () => {
-        resetUI();
+        console.log('[restartButton] Clic sur "Recommencer". Le joueur est à nouveau prêt.');
+        // On appelle directement la logique du bouton "Prêt"
+        readyButton.click();
     });
 
     // --- DÉMARRAGE DU PROCESSUS ---
