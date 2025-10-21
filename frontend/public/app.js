@@ -1,7 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     // --- Déterminer l'URL du backend ---
     const urlParams = new URLSearchParams(window.location.search);
-    const backendPort = urlParams.get('port') || '5001';
+    const backendPort = urlParams.get('port') || '5000';
     const backendHost = urlParams.get('host') || 'localhost';
     const backendBaseUrl = `http://${backendHost}:${backendPort}`;
 
