@@ -30,19 +30,23 @@ app.add_middleware(
 OWN_HOST = os.getenv("OWN_HOST", "localhost")
 NETMASK_CIDR = os.getenv("NETMASK_CIDR", "24")
 PORT = 5000
-# --- MODIFICATION: Temps du tour augmenté ---
 TURN_DURATION = 60.0
 
-# --- Modèles Pydantic (inchangés) ---
+# --- Modèles Pydantic ---
 class RegisterPayload(BaseModel):
     ip: str
     initialPlayers: Optional[List[str]] = Field(default_factory=list)
     initialTurnCounts: Optional[Dict[str, int]] = Field(default_factory=dict)
+    initialReadyPlayers: Optional[List[str]] = Field(default_factory=list)
+
+class ReadyPayload(BaseModel):
+    player_id: str
 
 class BallPayload(BaseModel):
     word: str
     incomingPlayers: List[str]
     incomingTurnCounts: Dict[str, int]
+    incomingReadyPlayers: List[str]
 
 class PassBallPayload(BaseModel):
     newWord: str
@@ -63,6 +67,8 @@ def reset_local_game_state():
             game_state["game_timer"].cancel()
         game_state["current_word"] = None
         game_state["game_timer"] = None
+        # On réinitialise aussi la liste des joueurs prêts
+        game_state["ready_players"] = []
 
 def broadcast(endpoint: str, payload: dict):
     with state_lock:
@@ -88,6 +94,7 @@ def on_startup():
         game_state["own_identifier"] = f"{OWN_HOST}:{PORT}"
         game_state["players"] = [game_state["own_identifier"]]
         game_state["turn_counts"] = {game_state["own_identifier"]: 0}
+        game_state["ready_players"] = []
         game_state["current_word"] = None
         game_state["game_timer"] = None
     logging.info(f"Serveur démarré. Identité: {game_state['own_identifier']}")
@@ -106,15 +113,58 @@ def register_back(player_identifier: str):
     logging.info(f"Handshake: Enregistrement en retour auprès de {player_identifier}.")
     try:
         with state_lock:
-            payload = {"ip": game_state["own_identifier"], "initialPlayers": game_state["players"], "initialTurnCounts": game_state["turn_counts"]}
+            payload = {
+                "ip": game_state["own_identifier"],
+                "initialPlayers": game_state["players"],
+                "initialTurnCounts": game_state["turn_counts"],
+                "initialReadyPlayers": game_state["ready_players"]
+            }
         requests.post(f"http://{player_identifier}/api/register", json=payload, timeout=1)
     except requests.RequestException:
         logging.warning(f"Handshake: Impossible de s'enregistrer en retour auprès de {player_identifier}.")
 
+# --- Logique de Démarrage du Jeu ---
+def start_game_logic(background_tasks: BackgroundTasks):
+    """Contient la logique pour démarrer une partie, appelée quand tout le monde est prêt."""
+    with state_lock:
+        # Double vérification pour éviter les démarrages multiples
+        if game_state.get("current_word") is not None:
+            logging.warning("Tentative de démarrage d'une partie déjà en cours. Annulation.")
+            return
+
+        logging.info("Démarrage effectif de la partie...")
+        start_word = random.choice('abcdefghijklmnopqrstuvwxyz')
+        all_players = game_state["players"]
+        if not all_players:
+            return
+
+        first_player_identifier = random.choice(all_players)
+        logging.info(f"Premier joueur choisi: {first_player_identifier}")
+
+        for p_id in all_players:
+            game_state["turn_counts"].setdefault(p_id, 0)
+        game_state["turn_counts"][first_player_identifier] += 1
+
+        payload_to_send = BallPayload(
+            word=start_word,
+            incomingPlayers=game_state["players"],
+            incomingTurnCounts=game_state["turn_counts"],
+            incomingReadyPlayers=game_state["ready_players"]
+        )
+
+        # Marquer le début du jeu
+        game_state["current_word"] = "game_starting"
+
+    # On sort du verrou pour les appels réseau
+    if first_player_identifier == game_state["own_identifier"]:
+        receive_ball(payload_to_send)
+    else:
+        background_tasks.add_task(send_ball_in_background, first_player_identifier, payload_to_send.dict())
+
 # --- API Endpoints ---
 
 def discover_player(ip_to_try: str):
-    if ip_to_try == OWN_HOST and OWN_HOST != "localhost":
+    if ip_to_try == OWN_HOST:
         return
     player_identifier = f"{ip_to_try}:{PORT}"
     logging.debug(f"Tentative de découverte sur {player_identifier}...")
@@ -122,7 +172,12 @@ def discover_player(ip_to_try: str):
         with state_lock:
             if player_identifier in game_state["players"]:
                 return
-            payload = {"ip": game_state["own_identifier"], "initialPlayers": game_state["players"], "initialTurnCounts": game_state["turn_counts"]}
+            payload = {
+                "ip": game_state["own_identifier"],
+                "initialPlayers": game_state["players"],
+                "initialTurnCounts": game_state["turn_counts"],
+                "initialReadyPlayers": game_state["ready_players"]
+            }
         response = requests.post(f"http://{player_identifier}/api/register", json=payload, timeout=0.5)
         if response.status_code == 200:
             data = response.json()
@@ -130,19 +185,16 @@ def discover_player(ip_to_try: str):
             with state_lock:
                 game_state["players"] = list(set(game_state["players"]).union(set(data.get("allPlayers", []))))
                 game_state["turn_counts"].update(data.get("allTurnCounts", {}))
+                game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(data.get("allReadyPlayers", []))))
     except requests.RequestException:
         pass
 
 @app.post("/api/discover", status_code=202)
 def discover():
     try:
-        if OWN_HOST == "localhost":
-            ips_to_scan = ["localhost"]
-            logging.info("Lancement de la découverte en mode local.")
-        else:
-            network = ipaddress.ip_network(f"{OWN_HOST}/{NETMASK_CIDR}", strict=False)
-            ips_to_scan = [str(ip) for ip in network.hosts()]
-            logging.info(f"Lancement de la découverte réseau sur {len(ips_to_scan)} adresses.")
+        network = ipaddress.ip_network(f"{OWN_HOST}/{NETMASK_CIDR}", strict=False)
+        ips_to_scan = [str(ip) for ip in network.hosts()]
+        logging.info(f"Lancement de la découverte réseau sur {len(ips_to_scan)} adresses.")
     except ValueError:
         logging.error(f"Erreur: L'IP '{OWN_HOST}' ou le masque '{NETMASK_CIDR}' est invalide.")
         return {"message": "Erreur de configuration réseau."}
@@ -162,7 +214,11 @@ def get_ball():
 @app.get("/api/players")
 def get_players():
     with state_lock:
-        return {"players": list(game_state.get("players", [])), "turn_counts": dict(game_state.get("turn_counts", {}))}
+        return {
+            "players": list(game_state.get("players", [])),
+            "turn_counts": dict(game_state.get("turn_counts", {})),
+            "ready_players": list(game_state.get("ready_players", []))
+        }
 
 @app.post("/api/register")
 def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
@@ -173,26 +229,73 @@ def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
             game_state["players"].append(payload.ip)
             game_state["turn_counts"].setdefault(payload.ip, 0)
             background_tasks.add_task(register_back, payload.ip)
+
         current_players = set(game_state["players"])
         new_players = set(payload.initialPlayers)
         game_state["players"] = list(current_players.union(new_players))
         game_state["turn_counts"].update(payload.initialTurnCounts)
-        return {"message": "Enregistré", "identity": game_state["own_identifier"], "allPlayers": game_state["players"], "allTurnCounts": game_state["turn_counts"]}
+        game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(payload.initialReadyPlayers)))
+
+        return {
+            "message": "Enregistré",
+            "identity": game_state["own_identifier"],
+            "allPlayers": game_state["players"],
+            "allTurnCounts": game_state["turn_counts"],
+            "allReadyPlayers": game_state["ready_players"]
+        }
+
+@app.post("/api/ready")
+def im_ready(background_tasks: BackgroundTasks):
+    """Le joueur se déclare prêt à jouer."""
+    with state_lock:
+        my_id = game_state["own_identifier"]
+        if my_id not in game_state["ready_players"]:
+            logging.info(f"Le joueur {my_id} est maintenant prêt.")
+            game_state["ready_players"].append(my_id)
+            # Notifier les autres qu'on est prêt
+            broadcast('/api/notify-ready', {"player_id": my_id})
+
+        # Vérifier si tout le monde est prêt
+        known_players = set(game_state["players"])
+        ready_players = set(game_state["ready_players"])
+        if known_players == ready_players and len(known_players) > 0 and game_state.get("current_word") is None:
+            start_game_logic(background_tasks)
+
+    return {"message": "Vous êtes prêt."}
+
+@app.post("/api/notify-ready")
+def notify_ready(payload: ReadyPayload, background_tasks: BackgroundTasks):
+    """Reçoit une notification qu'un autre joueur est prêt."""
+    with state_lock:
+        player_id = payload.player_id
+        if player_id not in game_state["ready_players"]:
+            logging.info(f"Notification: Le joueur {player_id} est maintenant prêt.")
+            game_state["ready_players"].append(player_id)
+
+        # Vérifier si tout le monde est prêt
+        known_players = set(game_state["players"])
+        ready_players = set(game_state["ready_players"])
+        if known_players == ready_players and len(known_players) > 0 and game_state.get("current_word") is None:
+            start_game_logic(background_tasks)
+
+    return {"message": "Notification reçue."}
 
 @app.post("/api/receive-ball")
 def receive_ball(payload: BallPayload):
     with state_lock:
-        if game_state.get("current_word") is not None:
+        if game_state.get("current_word") is not None and game_state.get("current_word") != "game_starting":
             raise HTTPException(status_code=409, detail="Déjà en train de jouer un tour.")
+
         game_state["current_word"] = payload.word
         game_state["players"] = list(set(game_state["players"]).union(set(payload.incomingPlayers)))
         game_state["turn_counts"].update(payload.incomingTurnCounts)
+        game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(payload.incomingReadyPlayers)))
+
         logging.info(f"Nouveau tour commencé. Mot: '{game_state['current_word']}'. Démarrage du minuteur de {TURN_DURATION}s.")
         game_state["game_timer"] = threading.Timer(TURN_DURATION, handle_loss)
         game_state["game_timer"].start()
     return {"message": "Balle reçue."}
 
-# --- MODIFICATION: Logique de pass_ball entièrement revue ---
 @app.post("/api/pass-ball")
 def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
     with state_lock:
@@ -202,68 +305,69 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
         if not payload.newWord.startswith(current_word) or len(payload.newWord) != len(current_word) + 1:
             raise HTTPException(status_code=400, detail="Mot invalide.")
 
-        logging.info("Validation du mot réussie.")
         if game_state.get("game_timer"):
             game_state["game_timer"].cancel()
 
         other_players = [p_id for p_id in game_state["players"] if p_id != game_state["own_identifier"]]
 
-        # --- CAS MULTIJOUEUR ---
+        next_player_identifier = None
+        # --- Logique de sélection ---
         if other_players:
-            logging.info("Mode multijoueur détecté.")
-            min_turns = min(game_state["turn_counts"].get(p, 0) for p in other_players)
-            eligible_players = [p for p in other_players if game_state["turn_counts"].get(p, 0) == min_turns]
-            next_player_identifier = random.choice(eligible_players)
+            # Mode multijoueur: choisir un autre joueur
+            candidates = list(other_players)
+            while candidates:
+                min_turns = min(game_state["turn_counts"].get(p, 0) for p in candidates)
+                eligible_players = [p for p in candidates if game_state["turn_counts"].get(p, 0) == min_turns]
+                potential_next_player = random.choice(eligible_players)
 
-            logging.info(f"Joueur suivant choisi (parmi les autres): {next_player_identifier}")
+                # Health check
+                try:
+                    requests.get(f"http://{potential_next_player}/health", timeout=0.5)
+                    next_player_identifier = potential_next_player
+                    logging.info(f"Joueur suivant (sain) choisi: {next_player_identifier}")
+                    break
+                except requests.RequestException:
+                    logging.warning(f"Le joueur {potential_next_player} n'a pas répondu au health check. Retrait des candidats pour ce tour.")
+                    candidates.remove(potential_next_player)
 
+            if not next_player_identifier:
+                logging.error("Aucun autre joueur n'a répondu au health check. Passage en mode solo pour ce tour.")
+                next_player_identifier = game_state["own_identifier"]
+
+        else:
+            # Mode solo
+            next_player_identifier = game_state["own_identifier"]
+
+        # --- Logique d'envoi ---
+        if next_player_identifier != game_state["own_identifier"]:
+            # Envoi à un autre joueur
             game_state["turn_counts"][next_player_identifier] += 1
             next_payload = BallPayload(
                 word=payload.newWord,
                 incomingPlayers=game_state["players"],
-                incomingTurnCounts=game_state["turn_counts"]
+                incomingTurnCounts=game_state["turn_counts"],
+                incomingReadyPlayers=game_state["ready_players"]
             )
             reset_local_game_state()
             background_tasks.add_task(send_ball_in_background, next_player_identifier, next_payload.dict())
-
-        # --- CAS SOLO ---
         else:
-            logging.info("Mode solo détecté. Simulation du tour de l'IA.")
-            # 1. L'IA ajoute une lettre au mot que le joueur a soumis
+            # Envoi à soi-même (mode solo ou fallback)
             simulated_word = payload.newWord + random.choice('abcdefghijklmnopqrstuvwxyz')
-            logging.info(f"Le joueur a envoyé '{payload.newWord}', l'IA répond avec '{simulated_word}'.")
-
-            # 2. On met à jour les comptes de tours pour soi-même
+            logging.info(f"Mode solo/fallback: L'IA répond avec '{simulated_word}'.")
             game_state["turn_counts"][game_state["own_identifier"]] += 1
-
-            # 3. On prépare la balle pour se la renvoyer
             next_payload = BallPayload(
                 word=simulated_word,
                 incomingPlayers=game_state["players"],
-                incomingTurnCounts=game_state["turn_counts"]
+                incomingTurnCounts=game_state["turn_counts"],
+                incomingReadyPlayers=game_state["ready_players"]
             )
             reset_local_game_state()
             receive_ball(next_payload)
 
     return {"message": "Balle passée avec succès."}
 
-@app.post("/api/start-game")
-def start_game(background_tasks: BackgroundTasks):
-    with state_lock:
-        start_word = random.choice('abcdefghijklmnopqrstuvwxyz')
-        all_players = game_state["players"]
-        if not all_players:
-            raise HTTPException(status_code=400, detail="Aucun joueur trouvé.")
-        first_player_identifier = random.choice(all_players)
-        for p_id in all_players:
-            game_state["turn_counts"].setdefault(p_id, 0)
-        game_state["turn_counts"][first_player_identifier] += 1
-        payload_to_send = BallPayload(word=start_word, incomingPlayers=game_state["players"], incomingTurnCounts=game_state["turn_counts"])
-        if first_player_identifier == game_state["own_identifier"]:
-            receive_ball(payload_to_send)
-        else:
-            background_tasks.add_task(send_ball_in_background, first_player_identifier, payload_to_send.dict())
-    return {"message": "Partie démarrée, première balle envoyée."}
+# On supprime l'ancien endpoint /api/start-game qui n'est plus utilisé
+# @app.post("/api/start-game") ...
 
 @app.post("/api/game-over")
 def game_over(payload: GameOverPayload):
