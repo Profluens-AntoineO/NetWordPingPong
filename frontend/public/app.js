@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Références aux éléments du DOM ---
     const statusEl = document.getElementById('status');
     const timerDisplayEl = document.getElementById('timer-display');
+    const wordPrefixDisplayEl = document.getElementById('word-prefix-display'); // <-- Nouvel élément
     const wordDisplayEl = document.getElementById('word-display');
     const wordInput = document.getElementById('word-input');
     const sendButton = document.getElementById('send-button');
@@ -23,63 +24,65 @@ document.addEventListener('DOMContentLoaded', () => {
     let pollingInterval = null;
     let playerListInterval = null;
 
-    // --- Fonctions de jeu ---
+    // --- Fonctions de gestion des états de l'UI ---
 
-    function stopPolling() {
-        if (pollingInterval) {
-            clearInterval(pollingInterval);
-            pollingInterval = null;
-        }
-    }
-
-    function startPolling() {
-        stopPolling();
-        pollingInterval = setInterval(checkForBall, 1000);
-    }
-
-    function resetUI() {
+    function setLobbyState() {
+        statusEl.textContent = "Cliquez sur 'Rechercher' puis sur 'Je suis prêt'.";
         wordDisplayEl.textContent = '';
+        wordPrefixDisplayEl.textContent = ''; // <-- Vider le préfixe
+        timerDisplayEl.textContent = '';
         wordInput.value = '';
         wordInput.disabled = true;
 
         sendButton.classList.add('hidden');
         restartButton.classList.add('hidden');
+
         readyButton.classList.remove('hidden');
         readyButton.disabled = false;
         discoverButton.classList.remove('hidden');
+        discoverButton.disabled = false;
 
-        statusEl.textContent = "Cliquez sur 'Rechercher' puis sur 'Je suis prêt'.";
         currentWord = null;
-
         if (gameTimer) clearTimeout(gameTimer);
         if (countdownInterval) clearInterval(countdownInterval);
-        timerDisplayEl.textContent = '';
 
         stopPolling();
     }
 
-    function handleLoss() {
-        if (countdownInterval) clearInterval(countdownInterval);
-        timerDisplayEl.textContent = 'Temps écoulé !';
-        clearTimeout(gameTimer);
-        statusEl.textContent = "Trop tard ! Vous avez perdu.";
+    function setWaitingState() {
+        statusEl.textContent = "Balle envoyée ! En attente du prochain tour...";
+        wordDisplayEl.textContent = '';
+        wordPrefixDisplayEl.textContent = ''; // <-- Vider le préfixe
+        timerDisplayEl.textContent = '';
+        wordInput.value = '';
         wordInput.disabled = true;
 
         sendButton.classList.add('hidden');
+        restartButton.classList.add('hidden');
         readyButton.classList.add('hidden');
         discoverButton.classList.add('hidden');
-        restartButton.classList.remove('hidden');
-
-        stopPolling();
     }
 
-    function startTurn(turnData) {
+    function setInTurnState(turnData) {
         const { word, timeout_ms } = turnData;
 
         stopPolling();
         currentWord = word;
         statusEl.textContent = "À vous de jouer !";
-        wordDisplayEl.textContent = word;
+
+        // --- MODIFICATION: Logique d'affichage du mot ---
+        const displayThreshold = 10;
+        if (word.length > displayThreshold) {
+            const prefix = word.substring(0, word.length - displayThreshold);
+            const suffix = word.substring(word.length - displayThreshold);
+            wordPrefixDisplayEl.textContent = prefix;
+            wordDisplayEl.textContent = suffix;
+        } else {
+            wordPrefixDisplayEl.textContent = '';
+            wordDisplayEl.textContent = word;
+        }
+        // --- FIN DE LA MODIFICATION ---
+
         wordInput.disabled = false;
         wordInput.focus();
 
@@ -95,13 +98,55 @@ document.addEventListener('DOMContentLoaded', () => {
         if (countdownInterval) clearInterval(countdownInterval);
         countdownInterval = setInterval(() => {
             timeLeft--;
-            if (timeLeft > 0) {
+            if (timeLeft >= 0) {
                 timerDisplayEl.textContent = `Temps restant : ${timeLeft}s`;
+            } else {
+                clearInterval(countdownInterval);
             }
         }, 1000);
 
         if (gameTimer) clearTimeout(gameTimer);
         gameTimer = setTimeout(handleLoss, timeout_ms);
+    }
+
+    function setGameOverState() {
+        if (countdownInterval) clearInterval(countdownInterval);
+        timerDisplayEl.textContent = 'Temps écoulé !';
+        clearTimeout(gameTimer);
+        statusEl.textContent = "Trop tard ! Vous avez perdu.";
+        wordInput.disabled = true;
+
+        sendButton.classList.add('hidden');
+        readyButton.classList.add('hidden');
+        discoverButton.classList.add('hidden');
+        restartButton.classList.remove('hidden');
+
+        stopPolling();
+    }
+
+    // --- Fonctions de logique de jeu ---
+
+    function stopPolling() {
+        if (pollingInterval) {
+            clearInterval(pollingInterval);
+            pollingInterval = null;
+        }
+    }
+
+    function startPolling() {
+        stopPolling();
+        pollingInterval = setInterval(checkForBall, 1000);
+    }
+
+    function handleLoss() {
+        setGameOverState();
+    }
+
+    function startTurn(turnData) {
+        if (typeof turnData.timeout_ms !== 'number' || turnData.timeout_ms <= 0) {
+            return;
+        }
+        setInTurnState(turnData);
     }
 
     async function passBall() {
@@ -115,10 +160,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         clearTimeout(gameTimer);
         if (countdownInterval) clearInterval(countdownInterval);
-        timerDisplayEl.textContent = '';
-        wordInput.disabled = true;
-        sendButton.disabled = true;
-        statusEl.textContent = "Envoi en cours...";
+
+        setWaitingState();
 
         try {
             const response = await fetch(`${backendBaseUrl}/api/pass-ball`, {
@@ -132,12 +175,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(errorData.detail || 'Erreur lors de l\'envoi.');
             }
 
-            resetUI();
             startPolling();
         } catch (error) {
             statusEl.textContent = error.message;
-            wordInput.disabled = false;
-            sendButton.disabled = false;
+            setInTurnState({ word: currentWord, timeout_ms: 10000 });
         }
     }
 
@@ -177,12 +218,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     const tagsContainer = document.createElement('div');
                     tagsContainer.className = 'flex gap-1';
 
-                    entry.applied_multipliers.forEach(multiplier => {
+                    entry.applied_multipliers.forEach(modifier => {
                         const tag = document.createElement('span');
-                        tag.textContent = multiplier;
+                        tag.textContent = modifier;
 
-                        if (multiplier.startsWith('combo')) {
+                        if (modifier.startsWith('combo')) {
                             tag.className = 'bg-purple-600 text-white text-xs font-semibold px-2 py-0.5 rounded-full';
+                        } else if (modifier === 'maudite') {
+                            tag.className = 'bg-emerald-600 text-white text-xs font-semibold px-2 py-0.5 rounded-full';
                         } else {
                             tag.className = 'bg-red-600 text-white text-xs font-semibold px-2 py-0.5 rounded-full';
                         }
@@ -200,6 +243,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateArchiveList(archive) {
+        if (!archiveListEl) return;
         archiveListEl.innerHTML = '';
         if (archive && archive.length > 0) {
             archive.forEach((gameHistory, index) => {
@@ -267,8 +311,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 .then(data => {
                     if (data) {
                         updatePlayerList(data);
-                        updateHistoryList(data.history); // <-- MISE A JOUR DE L'HISTORIQUE
-                        updateArchiveList(data.archive); // <-- MISE A JOUR DE L'ARCHIVE
+                        updateHistoryList(data.history);
+                        if (archiveListEl) {
+                            updateArchiveList(data.archive);
+                        }
                     }
                 })
                 .catch(() => {});
@@ -322,11 +368,12 @@ document.addEventListener('DOMContentLoaded', () => {
     wordInput.addEventListener('keyup', (event) => {
         if (event.key === 'Enter' && !sendButton.disabled) passBall();
     });
+
     restartButton.addEventListener('click', () => {
-        resetUI();
+        setLobbyState();
     });
 
     // --- DÉMARRAGE DU PROCESSUS ---
-    resetUI();
+    setLobbyState();
     startPlayerListPolling();
 });
