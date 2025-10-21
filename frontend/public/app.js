@@ -15,15 +15,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const sendButton = document.getElementById('send-button');
     const restartButton = document.getElementById('restart-button');
     const startButton = document.getElementById('start-button');
-    const discoverButton = document.getElementById('discover-button'); // <-- Récupérer le nouveau bouton
-    const playerListEl = document.getElementById('player-list'); // <-- Récupérer la liste
+    const discoverButton = document.getElementById('discover-button');
+    const playerListEl = document.getElementById('player-list');
 
     // --- État du jeu ---
     let currentWord = null;
     let gameTimer = null;
     let countdownInterval = null;
     let pollingInterval = null;
-    let playerListInterval = null; // <-- Variable pour le nouveau poller
+    let playerListInterval = null;
 
     // --- Fonctions de jeu ---
 
@@ -91,7 +91,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function passBall() {
-        // ... (fonction inchangée)
         console.log('[passBall] Tentative de soumission déclenchée.');
         const newWord = wordInput.value.trim().toLowerCase();
         const expectedPattern = new RegExp(`^${currentWord}[a-z]$`);
@@ -154,7 +153,52 @@ document.addEventListener('DOMContentLoaded', () => {
         pollingInterval = setInterval(checkForBall, 1000);
     }
 
-    // --- Fonction de découverte (mise à jour pour un meilleur feedback) ---
+    // --- NOUVELLE FONCTION: Mise à jour de la liste des joueurs (AVEC LOGS) ---
+    async function updatePlayerList() {
+        try {
+            // console.debug('[updatePlayerList] Interrogation de /api/players...');
+            const response = await fetch(`${backendBaseUrl}/api/players`);
+            if (!response.ok) {
+                // console.warn('[updatePlayerList] La requête a échoué, le serveur n\'est peut-être pas prêt.');
+                return;
+            }
+
+            const data = await response.json();
+            console.log('[updatePlayerList] Données reçues:', data);
+
+            playerListEl.innerHTML = '';
+
+            if (data.players && data.players.length > 0) {
+                console.log(`[updatePlayerList] ${data.players.length} joueur(s) trouvé(s). Mise à jour de l'affichage.`);
+                data.players.sort().forEach(playerIdentifier => {
+                    const li = document.createElement('li');
+                    const turnCount = data.turn_counts[playerIdentifier] || 0;
+
+                    let playerText = `${playerIdentifier} (Tours: ${turnCount})`;
+
+                    if (`http://${playerIdentifier}` === backendBaseUrl) {
+                        li.classList.add('text-cyan-400', 'font-bold');
+                        playerText += ' (Vous)';
+                    }
+
+                    li.textContent = playerText;
+                    playerListEl.appendChild(li);
+                });
+            } else {
+                console.log('[updatePlayerList] Aucun joueur détecté. Affichage du message par défaut.');
+                playerListEl.innerHTML = '<li>Aucun joueur détecté.</li>';
+            }
+        } catch (error) {
+            console.error('[updatePlayerList] Erreur lors de la récupération ou de la mise à jour de la liste des joueurs:', error);
+        }
+    }
+
+    function startPlayerListPolling() {
+        if (playerListInterval) clearInterval(playerListInterval);
+        updatePlayerList();
+        playerListInterval = setInterval(updatePlayerList, 1000);
+    }
+
     async function discoverAndRegister() {
         console.log('[discoverAndRegister] Lancement de la découverte...');
         statusEl.textContent = "Recherche en cours...";
@@ -163,13 +207,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             await fetch(`${backendBaseUrl}/api/discover`, { method: 'POST' });
-            // Le backend étant asynchrone, on donne un feedback immédiat
             statusEl.textContent = "Recherche lancée !";
         } catch (error) {
             statusEl.textContent = "Impossible de lancer la recherche.";
             console.error('[discoverAndRegister] Erreur:', error);
         } finally {
-            // On réactive les boutons après un court délai
             setTimeout(() => {
                 discoverButton.disabled = false;
                 startButton.disabled = false;
@@ -181,7 +223,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Initialisation ---
-    discoverButton.addEventListener('click', discoverAndRegister); // <-- Lier le bouton
+    discoverButton.addEventListener('click', discoverAndRegister);
 
     startButton.addEventListener('click', () => {
         console.log('[startButton] Clic sur "Commencer la partie".');
@@ -216,53 +258,8 @@ document.addEventListener('DOMContentLoaded', () => {
         startPolling();
     });
 
-
-
-    async function updatePlayerList() {
-        try {
-            const response = await fetch(`${backendBaseUrl}/api/players`);
-            if (!response.ok) return; // Ne rien faire si le backend n'est pas prêt
-
-            const data = await response.json();
-
-            // Vider la liste actuelle
-            playerListEl.innerHTML = '';
-
-            if (data.players && data.players.length > 0) {
-                data.players.sort().forEach(playerIdentifier => {
-                    const li = document.createElement('li');
-                    const turnCount = data.turn_counts[playerIdentifier] || 0;
-
-                    let playerText = `${playerIdentifier} (Tours: ${turnCount})`;
-
-                    // Mettre en évidence le joueur actuel
-                    if (`http://${playerIdentifier}` === backendBaseUrl) {
-                        li.classList.add('text-cyan-400', 'font-bold');
-                        playerText += ' (Vous)';
-                    }
-
-                    li.textContent = playerText;
-                    playerListEl.appendChild(li);
-                });
-            } else {
-                playerListEl.innerHTML = '<li>Aucun joueur détecté.</li>';
-            }
-        } catch (error) {
-            // On évite de spammer la console pour les erreurs de polling de la liste des joueurs
-        }
-    }
-
-    function startPlayerListPolling() {
-        if (playerListInterval) clearInterval(playerListInterval);
-        // On lance une première fois immédiatement, puis toutes les secondes
-        updatePlayerList();
-        playerListInterval = setInterval(updatePlayerList, 1000);
-    }
-
-
-
     // Démarre le processus au chargement de la page
     resetUI();
     startPolling();
-    startPlayerListPolling(); // <-- Démarrer le nouveau poller
+    startPlayerListPolling();
 });
