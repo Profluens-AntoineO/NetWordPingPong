@@ -19,4 +19,4 @@ echo "======================================================"
 # Utilise 'sed' pour remplacer le placeholder __LAN_IP__ par l'IP détectée
 # et pipe le résultat directement à 'docker-compose up'.
 # Le '-f -' indique à docker-compose de lire la configuration depuis l'entrée standard (stdin).
-sed "s/__LAN_IP__/$IP/g" docker-compose.template.yml | docker-compose -f - up --build
+sed "s/__LAN_IP__/$IP/g" docker-compose.template.yml | docker compose -f - up --build
