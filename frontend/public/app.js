@@ -10,7 +10,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const wordInput = document.getElementById('word-input');
     const sendButton = document.getElementById('send-button');
     const restartButton = document.getElementById('restart-button');
-    const readyButton = document.getElementById('ready-button'); // Nouveau bouton
+    const readyButton = document.getElementById('ready-button');
     const discoverButton = document.getElementById('discover-button');
     const playerListEl = document.getElementById('player-list');
 
@@ -18,8 +18,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentWord = null;
     let gameTimer = null;
     let countdownInterval = null;
-    let pollingInterval = null;
-    let playerListInterval = null;
+    let pollingInterval = null; // Pour la balle
+    let playerListInterval = null; // Pour la liste des joueurs
 
     // --- Fonctions de jeu ---
 
@@ -39,13 +39,13 @@ document.addEventListener('DOMContentLoaded', () => {
         wordDisplayEl.textContent = '';
         wordInput.value = '';
         wordInput.disabled = true;
-
+        
         sendButton.classList.add('hidden');
         restartButton.classList.add('hidden');
         readyButton.classList.remove('hidden');
-        readyButton.disabled = false; // Réactiver le bouton "Prêt"
+        readyButton.disabled = false;
         discoverButton.classList.remove('hidden');
-
+        
         statusEl.textContent = "Cliquez sur 'Rechercher' puis sur 'Je suis prêt'.";
         currentWord = null;
 
@@ -62,7 +62,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearTimeout(gameTimer);
         statusEl.textContent = "Trop tard ! Vous avez perdu.";
         wordInput.disabled = true;
-
+        
         sendButton.classList.add('hidden');
         readyButton.classList.add('hidden');
         discoverButton.classList.add('hidden');
@@ -127,7 +127,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const errorData = await response.json();
                 throw new Error(errorData.detail || 'Erreur lors de l\'envoi.');
             }
-
+            
             resetUI();
             startPolling();
         } catch (error) {
@@ -162,6 +162,9 @@ document.addEventListener('DOMContentLoaded', () => {
             playerListEl.innerHTML = '';
 
             if (data.players && data.players.length > 0) {
+                // --- CORRECTION: On récupère notre identité depuis le backend ---
+                const selfIdentifier = data.self;
+
                 data.players.sort().forEach(playerIdentifier => {
                     const li = document.createElement('li');
                     const isReady = data.ready_players.includes(playerIdentifier);
@@ -173,8 +176,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     statusSpan.className = isReady ? 'text-green-400' : 'text-amber-400';
                     li.appendChild(statusSpan);
 
-                    if (playerIdentifier.endsWith(`:${backendPort}`)) {
+                    // --- CORRECTION: La comparaison est maintenant simple et fiable ---
+                    if (playerIdentifier === selfIdentifier) {
                         li.classList.add('text-cyan-400', 'font-bold');
+                        // On ajoute la mention "(Vous)" au début pour une meilleure visibilité
+                        li.textContent = `(Vous) ${li.textContent}`;
                     }
 
                     playerListEl.appendChild(li);
@@ -183,7 +189,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 playerListEl.innerHTML = '<li>Aucun joueur détecté.</li>';
             }
         } catch (error) {
-            // Silence
+            // Silence pour ne pas spammer la console
         }
     }
 
@@ -217,7 +223,7 @@ document.addEventListener('DOMContentLoaded', () => {
     readyButton.addEventListener('click', () => {
         statusEl.textContent = "Vous êtes prêt ! En attente des autres joueurs...";
         readyButton.disabled = true;
-        discoverButton.disabled = true; // On ne peut plus chercher une fois prêt
+        discoverButton.disabled = true;
 
         fetch(`${backendBaseUrl}/api/ready`, { method: 'POST' })
             .then(response => {
@@ -229,11 +235,11 @@ document.addEventListener('DOMContentLoaded', () => {
             })
             .catch(error => {
                 statusEl.textContent = error.message;
-                readyButton.disabled = false; // Réactiver en cas d'erreur
+                readyButton.disabled = false;
                 discoverButton.disabled = false;
             });
     });
-
+    
     sendButton.addEventListener('click', passBall);
     wordInput.addEventListener('keyup', (event) => {
         if (event.key === 'Enter' && !sendButton.disabled) passBall();
@@ -242,7 +248,8 @@ document.addEventListener('DOMContentLoaded', () => {
         resetUI();
     });
 
-    // Démarre le processus au chargement de la page
+    // --- DÉMARRAGE DU PROCESSUS ---
     resetUI();
+    // On lance le polling de la liste des joueurs dès le début.
     startPlayerListPolling();
 });

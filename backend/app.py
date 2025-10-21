@@ -32,7 +32,7 @@ NETMASK_CIDR = os.getenv("NETMASK_CIDR", "24")
 PORT = 5000
 TURN_DURATION = 60.0
 
-# --- Modèles Pydantic ---
+# --- Modèles Pydantic (inchangés) ---
 class RegisterPayload(BaseModel):
     ip: str
     initialPlayers: Optional[List[str]] = Field(default_factory=list)
@@ -59,7 +59,7 @@ class GameOverPayload(BaseModel):
 game_state: Dict = {}
 state_lock = threading.RLock()
 
-# --- Fonctions Utilitaires ---
+# --- Fonctions Utilitaires (inchangées) ---
 def reset_local_game_state():
     logging.info("État du jeu local réinitialisé.")
     with state_lock:
@@ -86,7 +86,7 @@ def handle_loss():
     broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': 'Temps écoulé'})
     reset_local_game_state()
 
-# --- Événement de Démarrage ---
+# --- Événement de Démarrage (inchangé) ---
 @app.on_event("startup")
 def on_startup():
     with state_lock:
@@ -98,7 +98,7 @@ def on_startup():
         game_state["game_timer"] = None
     logging.info(f"Serveur démarré. Identité: {game_state['own_identifier']}")
 
-# --- Tâches de Fond ---
+# --- Tâches de Fond (inchangées) ---
 def send_ball_in_background(player_identifier: str, payload: dict):
     logging.info(f"Tâche de fond: Envoi de la balle à {player_identifier}.")
     try:
@@ -121,7 +121,7 @@ def register_back(player_identifier: str):
     except requests.RequestException:
         logging.warning(f"Handshake: Impossible de s'enregistrer en retour auprès de {player_identifier}.")
 
-# --- Logique de Démarrage du Jeu ---
+# --- Logique de Démarrage du Jeu (inchangée) ---
 def start_game_logic(background_tasks: BackgroundTasks):
     with state_lock:
         if game_state.get("current_word") is not None:
@@ -149,41 +149,46 @@ def start_game_logic(background_tasks: BackgroundTasks):
 
 # --- API Endpoints ---
 
-# --- MODIFICATION CRITIQUE DANS CETTE FONCTION ---
+# --- MODIFICATION: La fonction de découverte utilise maintenant /api/ping ---
 def discover_player(ip_to_try: str):
-    """Tente de contacter un joueur sur une IP donnée sur le port standard du jeu."""
+    """Tente de "pinger" un joueur, et si la réponse est bonne, l'enregistre."""
     if ip_to_try == OWN_HOST:
         return
 
     player_identifier = f"{ip_to_try}:{PORT}"
-    logging.debug(f"Tentative de découverte sur {player_identifier}...")
+    ping_url = f"http://{player_identifier}/api/ping"
 
-    # On vérifie si le joueur est déjà connu AVANT de faire la requête réseau
     with state_lock:
         if player_identifier in game_state["players"]:
-            logging.debug(f"Joueur {player_identifier} déjà connu. Scan suivant.")
             return
 
+    logging.debug(f"Ping de découverte sur {player_identifier}...")
     try:
-        with state_lock:
-            payload = {
-                "ip": game_state["own_identifier"],
-                "initialPlayers": game_state["players"],
-                "initialTurnCounts": game_state["turn_counts"],
-                "initialReadyPlayers": game_state["ready_players"]
-            }
+        # 1. PING
+        response_ping = requests.get(ping_url, timeout=0.3)
+        if response_ping.status_code == 200 and response_ping.json().get("message") == "pong":
+            logging.info(f"Pong reçu de {player_identifier}. C'est un joueur valide.")
 
-        response = requests.post(f"http://{player_identifier}/api/register", json=payload, timeout=0.5)
-
-        if response.status_code == 200:
-            data = response.json()
-            logging.info(f"Joueur découvert avec succès : {data.get('identity')}")
+            # 2. REGISTER
             with state_lock:
-                game_state["players"] = list(set(game_state["players"]).union(set(data.get("allPlayers", []))))
-                game_state["turn_counts"].update(data.get("allTurnCounts", {}))
-                game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(data.get("allReadyPlayers", []))))
+                payload_register = {
+                    "ip": game_state["own_identifier"],
+                    "initialPlayers": game_state["players"],
+                    "initialTurnCounts": game_state["turn_counts"],
+                    "initialReadyPlayers": game_state["ready_players"]
+                }
+            response_register = requests.post(f"http://{player_identifier}/api/register", json=payload_register, timeout=0.5)
+
+            if response_register.status_code == 200:
+                data = response_register.json()
+                logging.info(f"Enregistrement réussi auprès de : {data.get('identity')}")
+                with state_lock:
+                    game_state["players"] = list(set(game_state["players"]).union(set(data.get("allPlayers", []))))
+                    game_state["turn_counts"].update(data.get("allTurnCounts", {}))
+                    game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(data.get("allReadyPlayers", []))))
+
     except requests.RequestException:
-        pass # C'est normal que la plupart des requêtes échouent
+        pass # C'est normal que la plupart des pings échouent
 
 @app.post("/api/discover", status_code=202)
 def discover():
@@ -207,6 +212,13 @@ def discover():
 def health_check():
     return {"status": "ok"}
 
+# --- NOUVEL ENDPOINT: /api/ping ---
+@app.get("/api/ping")
+def ping_for_discovery():
+    """Répond 'pong' pour se signaler comme un joueur valide lors du scan."""
+    with state_lock:
+        return {"message": "pong", "identity": game_state.get("own_identifier")}
+
 @app.get("/api/get-ball")
 def get_ball():
     with state_lock:
@@ -216,6 +228,7 @@ def get_ball():
 def get_players():
     with state_lock:
         return {
+            "self": game_state.get("own_identifier"),
             "players": list(game_state.get("players", [])),
             "turn_counts": dict(game_state.get("turn_counts", {})),
             "ready_players": list(game_state.get("ready_players", []))
@@ -225,7 +238,6 @@ def get_players():
 def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
     with state_lock:
         is_new_player = payload.ip and payload.ip not in game_state["players"]
-
         if is_new_player:
             logging.info(f"NOUVEAU JOUEUR TROUVÉ ET AJOUTÉ: {payload.ip}")
             game_state["players"].append(payload.ip)
