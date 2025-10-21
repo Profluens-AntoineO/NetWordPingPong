@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const discoverButton = document.getElementById('discover-button');
     const playerListEl = document.getElementById('player-list');
     const historyListEl = document.getElementById('history-list');
+    const archiveListEl = document.getElementById('archive-list');
 
     // --- État du jeu ---
     let currentWord = null;
@@ -74,6 +75,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function startTurn(turnData) {
         const { word, timeout_ms } = turnData;
+
         stopPolling();
         currentWord = word;
         statusEl.textContent = "À vous de jouer !";
@@ -144,10 +146,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`${backendBaseUrl}/api/get-ball`);
             const data = await response.json();
 
-            if (data.history) {
-                updateHistoryList(data.history);
-            }
-
             if (data && data.word && data.word !== currentWord) {
                 if (data.word === "game_starting") {
                     statusEl.textContent = "La partie commence !";
@@ -201,6 +199,37 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function updateArchiveList(archive) {
+        archiveListEl.innerHTML = '';
+        if (archive && archive.length > 0) {
+            archive.forEach((gameHistory, index) => {
+                const gameContainer = document.createElement('div');
+                const gameTitle = document.createElement('h3');
+                gameTitle.textContent = `Partie ${index + 1}`;
+                gameTitle.className = 'font-bold text-slate-200 mt-2';
+                gameContainer.appendChild(gameTitle);
+
+                const gameUl = document.createElement('ul');
+                gameUl.className = 'pl-4 text-sm border-l border-slate-700 ml-2';
+
+                gameHistory.forEach(entry => {
+                    const li = document.createElement('li');
+                    li.innerHTML = `
+                        <span class="font-mono">${entry.word}</span>
+                        <span class="text-slate-500"> par </span>
+                        <span class="font-semibold">${entry.player}</span>
+                    `;
+                    gameUl.appendChild(li);
+                });
+
+                gameContainer.appendChild(gameUl);
+                archiveListEl.appendChild(gameContainer);
+            });
+        } else {
+            archiveListEl.innerHTML = '<span>Aucune partie archivée.</span>';
+        }
+    }
+
     function updatePlayerList(data) {
         playerListEl.innerHTML = '';
         if (data.players && data.players.length > 0) {
@@ -233,10 +262,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerListInterval) clearInterval(playerListInterval);
 
         const updateAllStatus = () => {
-            fetch(`${backendBaseUrl}/api/players`).then(res => res.json()).then(data => updatePlayerList(data)).catch(() => {});
-            fetch(`${backendBaseUrl}/api/archive`).then(res => res.json()).then(data => {
-                // updateArchiveList(data.archive); // Fonction à ajouter si vous voulez voir les archives
-            }).catch(() => {});
+            fetch(`${backendBaseUrl}/api/players`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data) {
+                        updatePlayerList(data);
+                        updateHistoryList(data.history); // <-- MISE A JOUR DE L'HISTORIQUE
+                        updateArchiveList(data.archive); // <-- MISE A JOUR DE L'ARCHIVE
+                    }
+                })
+                .catch(() => {});
         };
 
         updateAllStatus();
@@ -288,7 +323,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (event.key === 'Enter' && !sendButton.disabled) passBall();
     });
     restartButton.addEventListener('click', () => {
-        readyButton.click();
+        resetUI();
     });
 
     // --- DÉMARRAGE DU PROCESSUS ---
