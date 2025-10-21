@@ -1,10 +1,10 @@
 services:
   # Service Backend (Python/Flask)
   backend:
-    build: ./backend
+    build: ../backend
     ports:
       # Mappe le port 5000 du conteneur au port 5000 de la machine hôte
-      - "5000:5000"
+      - "192.168.1.200:5000:5000"
     environment:
       # ====================================================================
       # MODIFICATION MANUELLE REQUISE
@@ -27,11 +27,11 @@ services:
 
   # Service Frontend (Nginx)
   frontend:
-    build: ./frontend
+    build: ../frontend
     ports:
       # Mappe le port 80 du conteneur au port 8080 de la machine hôte
       # On utilise 8080 pour éviter les conflits si un autre service utilise le port 80
-      - "8080:80"
+      - "192.168.1.200:8080:80"
     depends_on:
       - backend # S'assure que le backend est démarré avant le frontend
     networks:
@@ -39,4 +39,8 @@ services:
 
 networks:
   pong-net:
-    driver: bridge
+    driver: macvlan
+    driver_opts:
+      parent: enp3s0
+    ipam:
+      driver: default
