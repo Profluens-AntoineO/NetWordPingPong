@@ -221,7 +221,23 @@ document.addEventListener('DOMContentLoaded', () => {
             }, 2000);
         }
     }
+    function resetUI() {
+        wordDisplayEl.textContent = '';
+        wordInput.value = '';
+        wordInput.disabled = true;
 
+        sendButton.classList.add('hidden');
+        restartButton.classList.add('hidden');
+        startButton.classList.remove('hidden'); // Afficher le bouton "Commencer"
+        discoverButton.classList.remove('hidden'); // Afficher le bouton "Rechercher"
+
+        statusEl.textContent = "Cliquez sur 'Rechercher' ou 'Commencer'."; // Message de départ
+        currentWord = null;
+
+        if (gameTimer) clearTimeout(gameTimer);
+        if (countdownInterval) clearInterval(countdownInterval);
+        timerDisplayEl.textContent = '';
+    }
     // --- Initialisation ---
     discoverButton.addEventListener('click', discoverAndRegister);
 
@@ -254,8 +270,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     restartButton.addEventListener('click', () => {
         console.log('[restartButton] Clic sur "Recommencer".');
+        // On réinitialise l'interface
         resetUI();
+        // On relance le polling pour la balle (au cas où un autre joueur nous enverrait une balle)
         startPolling();
+        // On relance le polling pour la liste des joueurs
+        startPlayerListPolling();
     });
 
     // Démarre le processus au chargement de la page
