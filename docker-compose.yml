@@ -11,8 +11,9 @@ services:
       # Remplacez "localhost" par l'adresse IP de votre machine
       # sur le réseau local (ex: 192.168.1.50).
       # ====================================================================
-      - OWN_HOST=192.168.1.140
+      - OWN_HOST=10.20.3.14
       - OWN_PORT=5000
+      - NETMASK_CIDR=16
     networks:
       - pong-net
 

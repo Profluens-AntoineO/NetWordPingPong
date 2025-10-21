@@ -16,12 +16,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const restartButton = document.getElementById('restart-button');
     const startButton = document.getElementById('start-button');
     const discoverButton = document.getElementById('discover-button'); // <-- Récupérer le nouveau bouton
+    const playerListEl = document.getElementById('player-list'); // <-- Récupérer la liste
 
     // --- État du jeu ---
     let currentWord = null;
     let gameTimer = null;
     let countdownInterval = null;
     let pollingInterval = null;
+    let playerListInterval = null; // <-- Variable pour le nouveau poller
 
     // --- Fonctions de jeu ---
 
@@ -214,7 +216,53 @@ document.addEventListener('DOMContentLoaded', () => {
         startPolling();
     });
 
+
+
+    async function updatePlayerList() {
+        try {
+            const response = await fetch(`${backendBaseUrl}/api/players`);
+            if (!response.ok) return; // Ne rien faire si le backend n'est pas prêt
+
+            const data = await response.json();
+
+            // Vider la liste actuelle
+            playerListEl.innerHTML = '';
+
+            if (data.players && data.players.length > 0) {
+                data.players.sort().forEach(playerIdentifier => {
+                    const li = document.createElement('li');
+                    const turnCount = data.turn_counts[playerIdentifier] || 0;
+
+                    let playerText = `${playerIdentifier} (Tours: ${turnCount})`;
+
+                    // Mettre en évidence le joueur actuel
+                    if (`http://${playerIdentifier}` === backendBaseUrl) {
+                        li.classList.add('text-cyan-400', 'font-bold');
+                        playerText += ' (Vous)';
+                    }
+
+                    li.textContent = playerText;
+                    playerListEl.appendChild(li);
+                });
+            } else {
+                playerListEl.innerHTML = '<li>Aucun joueur détecté.</li>';
+            }
+        } catch (error) {
+            // On évite de spammer la console pour les erreurs de polling de la liste des joueurs
+        }
+    }
+
+    function startPlayerListPolling() {
+        if (playerListInterval) clearInterval(playerListInterval);
+        // On lance une première fois immédiatement, puis toutes les secondes
+        updatePlayerList();
+        playerListInterval = setInterval(updatePlayerList, 1000);
+    }
+
+
+
     // Démarre le processus au chargement de la page
     resetUI();
     startPolling();
+    startPlayerListPolling(); // <-- Démarrer le nouveau poller
 });
