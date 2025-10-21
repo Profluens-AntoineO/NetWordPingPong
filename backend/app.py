@@ -70,8 +70,7 @@ state_lock = threading.RLock()
 
 # --- Fonctions Utilitaires ---
 def reset_local_game_state():
-    """Réinitialise l'état pour une nouvelle partie, en conservant l'archive et le dernier perdant."""
-    logging.info("Réinitialisation de l'état du jeu local pour une nouvelle partie.")
+    logging.info("Réinitialisation de l'état du jeu local (sauf le dernier perdant et l'archive).")
     with state_lock:
         if game_state.get("game_timer"):
             game_state["game_timer"].cancel()
@@ -96,7 +95,6 @@ def broadcast(endpoint: str, payload: dict):
 def handle_loss():
     logging.warning(f"Le minuteur de {TURN_DURATION} secondes a expiré. Le joueur a perdu.")
     broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': 'Temps écoulé'})
-    # La notification de game-over déclenchera l'archivage et la réinitialisation sur toutes les instances
     reset_local_game_state()
 
 # --- Événement de Démarrage ---
@@ -120,7 +118,6 @@ def send_ball_in_background(player_identifier: str, payload: dict):
     try:
         requests.post(f"http://{player_identifier}/api/receive-ball", json=payload, timeout=2)
     except requests.RequestException as e:
-        logging.error(f"Tâche de fond: Erreur en passant la balle à {player_identifier}: {e}")
         broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': f'Impossible de contacter {player_identifier}'})
 
 def register_back(player_identifier: str):
@@ -142,7 +139,6 @@ def start_game_logic(background_tasks: BackgroundTasks):
     with state_lock:
         if game_state.get("current_word") is not None:
             return
-        logging.info("Tous les joueurs sont prêts. Décision du premier joueur...")
 
         ready_players = game_state["ready_players"]
         last_loser = game_state.get("last_loser")
@@ -150,14 +146,12 @@ def start_game_logic(background_tasks: BackgroundTasks):
 
         if last_loser and last_loser in ready_players:
             first_player_identifier = last_loser
-            logging.info(f"Le perdant précédent ({last_loser}) a été choisi pour commencer.")
         else:
             if not ready_players: return
             sorted_players = sorted(ready_players)
             seed_string = "".join(sorted_players)
             player_index = hash(seed_string) % len(sorted_players)
             first_player_identifier = sorted_players[player_index]
-            logging.info(f"Choix déterministe: Le joueur '{first_player_identifier}' commence.")
 
         start_word = random.choice('abcdefghijklmnopqrstuvwxyz')
         logging.info(f"Premier joueur: {first_player_identifier}, Lettre de départ: '{start_word}'")
@@ -208,7 +202,7 @@ def discover_player(ip_to_try: str):
                     game_state["players"] = list(set(game_state["players"]).union(set(data.get("allPlayers", []))))
                     game_state["turn_counts"].update(data.get("allTurnCounts", {}))
                     game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(data.get("allReadyPlayers", []))))
-                    game_state["archive"] = data.get("allArchive", []) # Sync archive
+                    game_state["archive"] = data.get("allArchive", [])
     except requests.RequestException:
         pass
 
@@ -286,6 +280,7 @@ def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
             "allArchive": game_state["archive"]
         }
 
+# --- MODIFICATION: Logique de l'initiateur ---
 @app.post("/api/ready")
 def im_ready(background_tasks: BackgroundTasks):
     with state_lock:
@@ -296,11 +291,18 @@ def im_ready(background_tasks: BackgroundTasks):
 
         known_players = set(game_state["players"])
         ready_players = set(game_state["ready_players"])
+
         if known_players.issubset(ready_players) and len(known_players) > 0 and game_state.get("current_word") is None:
-            start_game_logic(background_tasks)
+            initiator = sorted(list(known_players))[0]
+            if my_id == initiator:
+                logging.info(f"Tous les joueurs sont prêts. En tant qu'initiateur ({my_id}), je démarre la partie.")
+                start_game_logic(background_tasks)
+            else:
+                logging.info(f"Tous les joueurs sont prêts, mais je ne suis pas l'initiateur ({initiator}). J'attends.")
 
     return {"message": "Vous êtes prêt."}
 
+# --- MODIFICATION: Logique de l'initiateur ---
 @app.post("/api/notify-ready")
 def notify_ready(payload: ReadyPayload, background_tasks: BackgroundTasks):
     with state_lock:
@@ -310,8 +312,15 @@ def notify_ready(payload: ReadyPayload, background_tasks: BackgroundTasks):
 
         known_players = set(game_state["players"])
         ready_players = set(game_state["ready_players"])
+
         if known_players.issubset(ready_players) and len(known_players) > 0 and game_state.get("current_word") is None:
-            start_game_logic(background_tasks)
+            initiator = sorted(list(known_players))[0]
+            my_id = game_state["own_identifier"]
+            if my_id == initiator:
+                logging.info(f"Notification reçue et tous les joueurs sont prêts. En tant qu'initiateur ({my_id}), je démarre la partie.")
+                start_game_logic(background_tasks)
+            else:
+                logging.info(f"Notification reçue et tous les joueurs sont prêts, mais je ne suis pas l'initiateur ({initiator}). J'attends.")
 
     return {"message": "Notification reçue."}
 
