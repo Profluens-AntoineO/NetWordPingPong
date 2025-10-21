@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const readyButton = document.getElementById('ready-button');
     const discoverButton = document.getElementById('discover-button');
     const playerListEl = document.getElementById('player-list');
+    const historyListEl = document.getElementById('history-list');
 
     // --- État du jeu ---
     let currentWord = null;
@@ -71,7 +72,8 @@ document.addEventListener('DOMContentLoaded', () => {
         stopPolling();
     }
 
-    function startTurn(word) {
+    function startTurn(turnData) {
+        const { word, timeout_ms } = turnData;
         stopPolling();
         currentWord = word;
         statusEl.textContent = "À vous de jouer !";
@@ -85,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sendButton.classList.remove('hidden');
         sendButton.disabled = false;
 
-        let timeLeft = 60;
+        let timeLeft = timeout_ms / 1000;
         timerDisplayEl.textContent = `Temps restant : ${timeLeft}s`;
 
         if (countdownInterval) clearInterval(countdownInterval);
@@ -97,7 +99,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
 
         if (gameTimer) clearTimeout(gameTimer);
-        gameTimer = setTimeout(handleLoss, 60000);
+        gameTimer = setTimeout(handleLoss, timeout_ms);
     }
 
     async function passBall() {
@@ -141,15 +143,42 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${backendBaseUrl}/api/get-ball`);
             const data = await response.json();
+
+            // Mise à jour de l'historique
+            if (data.history) {
+                updateHistoryList(data.history);
+            }
+
             if (data && data.word && data.word !== currentWord) {
                 if (data.word === "game_starting") {
                     statusEl.textContent = "La partie commence !";
                 } else {
-                    startTurn(data.word);
+                    // On passe l'objet complet
+                    startTurn(data);
                 }
             }
-        } catch (error) {
-            // Silence
+        } catch (error) { /* Silence */ }
+    }
+
+    // --- NOUVELLE FONCTION: Mise à jour de l'historique ---
+    function updateHistoryList(history) {
+        historyListEl.innerHTML = '';
+        if (history && history.length > 0) {
+            history.forEach(entry => {
+                const li = document.createElement('li');
+                li.innerHTML = `
+                <span class="font-mono">${entry.word}</span>
+                <span class="text-slate-500"> par </span>
+                <span class="font-semibold">${entry.player}</span>
+                <span class="text-slate-500"> en </span>
+                <span class="text-cyan-400">${entry.response_time_ms} ms</span>
+            `;
+                historyListEl.appendChild(li);
+            });
+            // Scroll vers le bas
+            historyListEl.scrollTop = historyListEl.scrollHeight;
+        } else {
+            historyListEl.innerHTML = '<li>En attente du premier coup...</li>';
         }
     }
 
