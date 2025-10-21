@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  # --- Service Frontend (inchangé) ---
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+
+  # --- Service Backend (UNIQUE) ---
+  backend:
+    build: ./backend
+    # Le port 5000 du conteneur est mappé sur le port 5000 de la machine.
+    ports:
+      - "5000:5000"
+    environment:
+      # ====================================================================
+      # Ces valeurs seront remplacées par le script start.sh
+      # ====================================================================
+      - OWN_HOST=__LAN_IP__
+      - NETMASK_CIDR=24 # /24 est un défaut très courant, modifiable si besoin.
+    healthcheck:
+      # Vérifie si le serveur est prêt avant de le considérer comme "sain".
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

@@ -57,11 +57,9 @@ document.addEventListener('DOMContentLoaded', () => {
         discoverButton.classList.add('hidden');
         restartButton.classList.remove('hidden');
     }
-
     function startTurn(word) {
         console.log(`%c[startTurn] Nouveau tour commencé avec le mot : "${word}"`, 'color: #61dafb; font-weight: bold;');
-        if (pollingInterval) clearInterval(pollingInterval);
-        pollingInterval = null;
+        stopPolling();
 
         currentWord = word;
         statusEl.textContent = "À vous de jouer !";
@@ -75,7 +73,8 @@ document.addEventListener('DOMContentLoaded', () => {
         sendButton.classList.remove('hidden');
         sendButton.disabled = false;
 
-        let timeLeft = 5;
+        // --- MODIFICATION: Temps du tour augmenté à 60 secondes ---
+        let timeLeft = 60;
         timerDisplayEl.textContent = `Temps restant : ${timeLeft}s`;
 
         if (countdownInterval) clearInterval(countdownInterval);
@@ -87,7 +86,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
 
         if (gameTimer) clearTimeout(gameTimer);
-        gameTimer = setTimeout(handleLoss, 5000);
+        gameTimer = setTimeout(handleLoss, 60000); // 60000 millisecondes
     }
 
     async function passBall() {
