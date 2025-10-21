@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NetWord Ping Pong</title>
-    <!-- Ajout du CDN de Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-800 text-white font-sans flex items-center justify-center h-screen">
@@ -15,18 +14,20 @@
 
     <div id="status" class="text-slate-400 text-lg h-7 mb-4">Initialisation...</div>
 
-    <!-- Compte à rebours -->
     <div id="timer-display" class="text-2xl font-bold text-amber-400 h-8"></div>
 
-    <!-- Affichage du mot -->
     <div id="word-display" class="text-6xl font-mono tracking-[0.5rem] text-cyan-300 my-8 h-16 uppercase"></div>
 
-    <!-- Champ de saisie -->
     <input type="text" id="word-input" disabled
            class="w-4/5 p-2 text-3xl text-center bg-slate-700 border-2 border-slate-600 rounded-md focus:outline-none focus:ring-2 focus:ring-cyan-400 transition">
 
     <!-- Conteneur pour les boutons -->
-    <div class="mt-6 flex justify-center gap-4">
+    <div class="mt-6 flex justify-center items-center gap-4">
+        <!-- BOUTON AJOUTÉ -->
+        <button id="discover-button" class="py-3 px-6 bg-indigo-600 hover:bg-indigo-700 rounded-md text-lg font-semibold transition-colors duration-200 disabled:bg-slate-600 disabled:cursor-not-allowed">
+            Rechercher des joueurs
+        </button>
+
         <button id="start-button" class="hidden py-3 px-6 bg-green-600 hover:bg-green-700 rounded-md text-lg font-semibold transition-colors duration-200 disabled:bg-slate-600 disabled:cursor-not-allowed">
             Commencer la partie
         </button>

@@ -1,7 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     // --- Déterminer l'URL du backend ---
     const urlParams = new URLSearchParams(window.location.search);
-    const backendPort = urlParams.get('port') || '5000';
+    const backendPort = urlParams.get('port') || '5001';
     const backendHost = urlParams.get('host') || 'localhost';
     const backendBaseUrl = `http://${backendHost}:${backendPort}`;
 
@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const sendButton = document.getElementById('send-button');
     const restartButton = document.getElementById('restart-button');
     const startButton = document.getElementById('start-button');
+    const discoverButton = document.getElementById('discover-button'); // <-- Récupérer le nouveau bouton
 
     // --- État du jeu ---
     let currentWord = null;
@@ -31,9 +32,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         sendButton.classList.add('hidden');
         restartButton.classList.add('hidden');
-        startButton.classList.remove('hidden'); // Afficher le bouton "Commencer"
+        startButton.classList.remove('hidden');
+        discoverButton.classList.remove('hidden');
 
-        statusEl.textContent = "Prêt à jouer. Cliquez sur 'Commencer' ou attendez la balle.";
+        statusEl.textContent = "Cliquez sur 'Rechercher' ou 'Commencer'.";
         currentWord = null;
         if (gameTimer) clearTimeout(gameTimer);
         if (countdownInterval) clearInterval(countdownInterval);
@@ -50,7 +52,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         sendButton.classList.add('hidden');
         startButton.classList.add('hidden');
-        restartButton.classList.remove('hidden'); // Afficher le bouton "Recommencer"
+        discoverButton.classList.add('hidden');
+        restartButton.classList.remove('hidden');
     }
 
     function startTurn(word) {
@@ -66,10 +69,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         startButton.classList.add('hidden');
         restartButton.classList.add('hidden');
-        sendButton.classList.remove('hidden'); // Afficher le bouton "Renvoyer"
+        discoverButton.classList.add('hidden');
+        sendButton.classList.remove('hidden');
         sendButton.disabled = false;
 
-        let timeLeft = 10;
+        let timeLeft = 5;
         timerDisplayEl.textContent = `Temps restant : ${timeLeft}s`;
 
         if (countdownInterval) clearInterval(countdownInterval);
@@ -85,6 +89,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function passBall() {
+        // ... (fonction inchangée)
         console.log('[passBall] Tentative de soumission déclenchée.');
         const newWord = wordInput.value.trim().toLowerCase();
         const expectedPattern = new RegExp(`^${currentWord}[a-z]$`);
@@ -147,22 +152,41 @@ document.addEventListener('DOMContentLoaded', () => {
         pollingInterval = setInterval(checkForBall, 1000);
     }
 
+    // --- Fonction de découverte (mise à jour pour un meilleur feedback) ---
     async function discoverAndRegister() {
+        console.log('[discoverAndRegister] Lancement de la découverte...');
+        statusEl.textContent = "Recherche en cours...";
+        discoverButton.disabled = true;
+        startButton.disabled = true;
+
         try {
-            console.log('[discoverAndRegister] Lancement de la découverte...');
-            statusEl.textContent = "Recherche d'autres joueurs...";
             await fetch(`${backendBaseUrl}/api/discover`, { method: 'POST' });
+            // Le backend étant asynchrone, on donne un feedback immédiat
+            statusEl.textContent = "Recherche lancée !";
         } catch (error) {
-            statusEl.textContent = "Impossible de contacter le serveur.";
+            statusEl.textContent = "Impossible de lancer la recherche.";
             console.error('[discoverAndRegister] Erreur:', error);
+        } finally {
+            // On réactive les boutons après un court délai
+            setTimeout(() => {
+                discoverButton.disabled = false;
+                startButton.disabled = false;
+                if(statusEl.textContent === "Recherche lancée !") {
+                    statusEl.textContent = "Prêt à jouer.";
+                }
+            }, 2000);
         }
     }
 
     // --- Initialisation ---
+    discoverButton.addEventListener('click', discoverAndRegister); // <-- Lier le bouton
+
     startButton.addEventListener('click', () => {
         console.log('[startButton] Clic sur "Commencer la partie".');
         statusEl.textContent = "Démarrage de la partie...";
-        startButton.disabled = true; // Empêcher les double-clics
+        startButton.disabled = true;
+        discoverButton.disabled = true;
+
         fetch(`${backendBaseUrl}/api/start-game`, { method: 'POST' })
             .then(response => {
                 if (!response.ok) {
@@ -176,7 +200,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.error('[startButton] Erreur:', error);
             })
             .finally(() => {
-                startButton.disabled = false; // Réactiver le bouton
+                // Ne pas réactiver les boutons ici, car le jeu est censé commencer
             });
     });
 
@@ -190,9 +214,7 @@ document.addEventListener('DOMContentLoaded', () => {
         startPolling();
     });
 
-    // Démarre le processus
-    discoverAndRegister().then(() => {
-        resetUI();
-        startPolling();
-    });
+    // Démarre le processus au chargement de la page
+    resetUI();
+    startPolling();
 });
