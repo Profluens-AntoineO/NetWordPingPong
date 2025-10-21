@@ -16,6 +16,14 @@ services:
       - NETMASK_CIDR=16
     networks:
       - pong-net
+    healthcheck:
+      # Commande à exécuter à l'intérieur du conteneur pour vérifier sa santé.
+      # curl -f échoue avec un code d'erreur si le statut HTTP n'est pas 2xx.
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s   # Vérifie toutes les 10 secondes.
+      timeout: 5s     # Considère la vérification comme échouée après 5 secondes.
+      retries: 5      # Fait 5 tentatives avant de marquer le conteneur comme "unhealthy".
+      start_period: 20s # Donne 20 secondes au conteneur pour démarrer avant de commencer les checks.
 
   # Service Frontend (Nginx)
   frontend:
