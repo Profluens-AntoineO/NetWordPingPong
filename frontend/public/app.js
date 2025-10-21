@@ -19,8 +19,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentWord = null;
     let gameTimer = null;
     let countdownInterval = null;
-    let pollingInterval = null; // Pour la balle
-    let playerListInterval = null; // Pour la liste des joueurs
+    let pollingInterval = null;
+    let playerListInterval = null;
 
     // --- Fonctions de jeu ---
 
@@ -40,13 +40,13 @@ document.addEventListener('DOMContentLoaded', () => {
         wordDisplayEl.textContent = '';
         wordInput.value = '';
         wordInput.disabled = true;
-        
+
         sendButton.classList.add('hidden');
         restartButton.classList.add('hidden');
         readyButton.classList.remove('hidden');
         readyButton.disabled = false;
         discoverButton.classList.remove('hidden');
-        
+
         statusEl.textContent = "Cliquez sur 'Rechercher' puis sur 'Je suis prêt'.";
         currentWord = null;
 
@@ -63,7 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearTimeout(gameTimer);
         statusEl.textContent = "Trop tard ! Vous avez perdu.";
         wordInput.disabled = true;
-        
+
         sendButton.classList.add('hidden');
         readyButton.classList.add('hidden');
         discoverButton.classList.add('hidden');
@@ -87,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sendButton.classList.remove('hidden');
         sendButton.disabled = false;
 
-        let timeLeft = timeout_ms / 1000;
+        let timeLeft = Math.round(timeout_ms / 1000);
         timerDisplayEl.textContent = `Temps restant : ${timeLeft}s`;
 
         if (countdownInterval) clearInterval(countdownInterval);
@@ -129,7 +129,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const errorData = await response.json();
                 throw new Error(errorData.detail || 'Erreur lors de l\'envoi.');
             }
-            
+
             resetUI();
             startPolling();
         } catch (error) {
@@ -144,7 +144,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`${backendBaseUrl}/api/get-ball`);
             const data = await response.json();
 
-            // Mise à jour de l'historique
             if (data.history) {
                 updateHistoryList(data.history);
             }
@@ -153,72 +152,80 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (data.word === "game_starting") {
                     statusEl.textContent = "La partie commence !";
                 } else {
-                    // On passe l'objet complet
                     startTurn(data);
                 }
             }
         } catch (error) { /* Silence */ }
     }
 
-    // --- NOUVELLE FONCTION: Mise à jour de l'historique ---
     function updateHistoryList(history) {
         historyListEl.innerHTML = '';
         if (history && history.length > 0) {
             history.forEach(entry => {
                 const li = document.createElement('li');
-                li.innerHTML = `
-                <span class="font-mono">${entry.word}</span>
-                <span class="text-slate-500"> par </span>
-                <span class="font-semibold">${entry.player}</span>
-                <span class="text-slate-500"> en </span>
-                <span class="text-cyan-400">${entry.response_time_ms} ms</span>
-            `;
+                li.className = 'flex items-center gap-2 flex-wrap';
+
+                const textContainer = document.createElement('div');
+                textContainer.innerHTML = `
+                    <span class="font-mono">${entry.word}</span>
+                    <span class="text-slate-500"> par </span>
+                    <span class="font-semibold">${entry.player}</span>
+                    <span class="text-slate-500"> en </span>
+                    <span class="text-cyan-400">${entry.response_time_ms} ms</span>
+                `;
+                li.appendChild(textContainer);
+
+                if (entry.applied_multipliers && entry.applied_multipliers.length > 0) {
+                    const tagsContainer = document.createElement('div');
+                    tagsContainer.className = 'flex gap-1';
+
+                    entry.applied_multipliers.forEach(multiplier => {
+                        const tag = document.createElement('span');
+                        tag.textContent = multiplier;
+
+                        if (multiplier.startsWith('combo')) {
+                            tag.className = 'bg-purple-600 text-white text-xs font-semibold px-2 py-0.5 rounded-full';
+                        } else {
+                            tag.className = 'bg-red-600 text-white text-xs font-semibold px-2 py-0.5 rounded-full';
+                        }
+                        tagsContainer.appendChild(tag);
+                    });
+                    li.appendChild(tagsContainer);
+                }
+
                 historyListEl.appendChild(li);
             });
-            // Scroll vers le bas
             historyListEl.scrollTop = historyListEl.scrollHeight;
         } else {
             historyListEl.innerHTML = '<li>En attente du premier coup...</li>';
         }
     }
 
-    async function updatePlayerList() {
-        try {
-            const response = await fetch(`${backendBaseUrl}/api/players`);
-            if (!response.ok) return;
+    function updatePlayerList(data) {
+        playerListEl.innerHTML = '';
+        if (data.players && data.players.length > 0) {
+            const selfIdentifier = data.self;
+            data.players.sort().forEach(playerIdentifier => {
+                const li = document.createElement('li');
+                const isReady = data.ready_players.includes(playerIdentifier);
 
-            const data = await response.json();
-            playerListEl.innerHTML = '';
+                let playerText = `${playerIdentifier}`;
+                if (playerIdentifier === selfIdentifier) {
+                    playerText = `(Vous) ${playerText}`;
+                    li.classList.add('text-cyan-400', 'font-bold');
+                }
 
-            if (data.players && data.players.length > 0) {
-                // --- CORRECTION: On récupère notre identité depuis le backend ---
-                const selfIdentifier = data.self;
+                li.textContent = playerText;
 
-                data.players.sort().forEach(playerIdentifier => {
-                    const li = document.createElement('li');
-                    const isReady = data.ready_players.includes(playerIdentifier);
+                const statusSpan = document.createElement('span');
+                statusSpan.textContent = isReady ? ' (Prêt !)' : ' (En attente)';
+                statusSpan.className = isReady ? 'text-green-400' : 'text-amber-400';
+                li.appendChild(statusSpan);
 
-                    li.textContent = `${playerIdentifier}`;
-
-                    const statusSpan = document.createElement('span');
-                    statusSpan.textContent = isReady ? ' (Prêt !)' : ' (En attente)';
-                    statusSpan.className = isReady ? 'text-green-400' : 'text-amber-400';
-                    li.appendChild(statusSpan);
-
-                    // --- CORRECTION: La comparaison est maintenant simple et fiable ---
-                    if (playerIdentifier === selfIdentifier) {
-                        li.classList.add('text-cyan-400', 'font-bold');
-                        // On ajoute la mention "(Vous)" au début pour une meilleure visibilité
-                        li.textContent = `(Vous) ${li.textContent}`;
-                    }
-
-                    playerListEl.appendChild(li);
-                });
-            } else {
-                playerListEl.innerHTML = '<li>Aucun joueur détecté.</li>';
-            }
-        } catch (error) {
-            // Silence pour ne pas spammer la console
+                playerListEl.appendChild(li);
+            });
+        } else {
+            playerListEl.innerHTML = '<li>Aucun joueur détecté.</li>';
         }
     }
 
@@ -226,52 +233,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerListInterval) clearInterval(playerListInterval);
 
         const updateAllStatus = () => {
-            updatePlayerList();
-            // On ajoute la mise à jour de l'archive ici
-            fetch(`${backendBaseUrl}/api/archive`)
-                .then(res => res.json())
-                .then(data => {
-                    if (data.archive) {
-                        updateArchiveList(data.archive);
-                    }
-                })
-                .catch(() => {}); // Silence pour les erreurs de polling
+            fetch(`${backendBaseUrl}/api/players`).then(res => res.json()).then(data => updatePlayerList(data)).catch(() => {});
+            fetch(`${backendBaseUrl}/api/archive`).then(res => res.json()).then(data => {
+                // updateArchiveList(data.archive); // Fonction à ajouter si vous voulez voir les archives
+            }).catch(() => {});
         };
 
         updateAllStatus();
-        playerListInterval = setInterval(updateAllStatus, 2000); // On peut ralentir ce polling
-    }
-    function updateArchiveList(archive) {
-        archiveListEl.innerHTML = '';
-        if (archive && archive.length > 0) {
-            archive.forEach((gameHistory, index) => {
-                const gameContainer = document.createElement('div');
-                const gameTitle = document.createElement('h3');
-                gameTitle.textContent = `Partie ${index + 1}`;
-                gameTitle.className = 'font-bold text-slate-200';
-                gameContainer.appendChild(gameTitle);
-
-                const gameUl = document.createElement('ul');
-                gameUl.className = 'pl-4 text-sm';
-
-                gameHistory.forEach(entry => {
-                    const li = document.createElement('li');
-                    li.innerHTML = `
-                        <span class="font-mono">${entry.word}</span>
-                        <span class="text-slate-500"> par </span>
-                        <span class="font-semibold">${entry.player}</span>
-                        <span class="text-slate-500"> en </span>
-                        <span class="text-cyan-400">${entry.response_time_ms} ms</span>
-                    `;
-                    gameUl.appendChild(li);
-                });
-
-                gameContainer.appendChild(gameUl);
-                archiveListEl.appendChild(gameContainer);
-            });
-        } else {
-            archiveListEl.innerHTML = '<span>Aucune partie archivée.</span>';
-        }
+        playerListInterval = setInterval(updateAllStatus, 2000);
     }
 
     async function discoverAndRegister() {
@@ -305,7 +274,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!response.ok) {
                     return response.json().then(err => { throw new Error(err.detail); });
                 }
-                // Le backend gère le démarrage, on se met en attente
                 startPolling();
             })
             .catch(error => {
@@ -314,19 +282,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 discoverButton.disabled = false;
             });
     });
-    
+
     sendButton.addEventListener('click', passBall);
     wordInput.addEventListener('keyup', (event) => {
         if (event.key === 'Enter' && !sendButton.disabled) passBall();
     });
     restartButton.addEventListener('click', () => {
-        console.log('[restartButton] Clic sur "Recommencer". Le joueur est à nouveau prêt.');
-        // On appelle directement la logique du bouton "Prêt"
         readyButton.click();
     });
 
     // --- DÉMARRAGE DU PROCESSUS ---
     resetUI();
-    // On lance le polling de la liste des joueurs dès le début.
     startPlayerListPolling();
 });

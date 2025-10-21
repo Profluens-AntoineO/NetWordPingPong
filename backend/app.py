@@ -27,17 +27,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Variables d'environnement ---
+# --- Variables d'environnement et Constantes de Jeu ---
 OWN_HOST = os.getenv("OWN_HOST", "localhost")
 NETMASK_CIDR = os.getenv("NETMASK_CIDR", "24")
 PORT = 5000
-TURN_DURATION = 60.0
 
-# --- Modèles Pydantic ---
+BASE_TIMEOUT_MS = 60000
+MIN_TIMEOUT_MS = 2000
+RESPONSE_REFERENCE_MS = 10000
+FAST_RESPONSE_THRESHOLD_MS = 3000
+
+# Multiplicateurs
+FAST_RESPONSE_MULTIPLIER = 1.5
+NOVELTY_MULTIPLIER = 1.2
+PROXIMITY_MULTIPLIER = 1.2
+
+# --- Modèles Pydantic (MODIFIÉS) ---
 class HistoryEntry(BaseModel):
     player: str
     word: str
     response_time_ms: int
+    applied_multipliers: List[str] = []
 
 class RegisterPayload(BaseModel):
     ip: str
@@ -52,6 +62,7 @@ class ReadyPayload(BaseModel):
 class BallPayload(BaseModel):
     word: str
     timeout_ms: int
+    combo_counter: int  # <-- Ajout du compteur de combo
     incomingPlayers: List[str]
     incomingTurnCounts: Dict[str, int]
     incomingReadyPlayers: List[str]
@@ -70,7 +81,6 @@ state_lock = threading.RLock()
 
 # --- Fonctions Utilitaires ---
 def reset_local_game_state():
-    logging.info("Réinitialisation de l'état du jeu local (sauf le dernier perdant et l'archive).")
     with state_lock:
         if game_state.get("game_timer"):
             game_state["game_timer"].cancel()
@@ -79,22 +89,22 @@ def reset_local_game_state():
         game_state["ready_players"] = []
         game_state["history"] = []
         game_state["turn_start_time"] = None
+        game_state["combo_counter"] = 1 # <-- Réinitialisation du combo
 
 def broadcast(endpoint: str, payload: dict):
     with state_lock:
         players_to_contact = [p_id for p_id in game_state.get("players", []) if p_id != game_state.get("own_identifier")]
-    logging.info(f"Diffusion du message sur '{endpoint}' à {len(players_to_contact)} joueur(s).")
     def post_request(player_identifier):
         try:
             requests.post(f"http://{player_identifier}{endpoint}", json=payload, timeout=1)
         except requests.RequestException:
-            logging.warning(f"Impossible de contacter le joueur {player_identifier} lors de la diffusion.")
+            pass
     with ThreadPoolExecutor(max_workers=20) as executor:
         executor.map(post_request, players_to_contact)
 
 def handle_loss():
-    logging.warning(f"Le minuteur de {TURN_DURATION} secondes a expiré. Le joueur a perdu.")
-    broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': 'Temps écoulé'})
+    timeout = game_state.get("current_turn_timeout_ms", BASE_TIMEOUT_MS) / 1000.0
+    broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': f'Temps écoulé ({timeout}s)'})
     reset_local_game_state()
 
 # --- Événement de Démarrage ---
@@ -111,13 +121,13 @@ def on_startup():
         game_state["history"] = []
         game_state["archive"] = []
         game_state["turn_start_time"] = None
-    logging.info(f"Serveur démarré. Identité: {game_state['own_identifier']}")
+        game_state["combo_counter"] = 1 # <-- Initialisation du combo
 
 # --- Tâches de Fond ---
 def send_ball_in_background(player_identifier: str, payload: dict):
     try:
         requests.post(f"http://{player_identifier}/api/receive-ball", json=payload, timeout=2)
-    except requests.RequestException as e:
+    except requests.RequestException:
         broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': f'Impossible de contacter {player_identifier}'})
 
 def register_back(player_identifier: str):
@@ -134,11 +144,59 @@ def register_back(player_identifier: str):
     except requests.RequestException:
         pass
 
+# --- NOUVELLE FONCTION: Calcul du Timeout ---
+def calculate_next_timeout(response_time_ms: int, previous_word: str, new_word: str, incoming_combo: int) -> (int, List[str], int):
+    """Calcule le timeout, retourne la liste des multiplicateurs et le nouveau compteur de combo."""
+    applied_multipliers = []
+    is_special_move = False
+
+    # 1. Calcul du delta de vitesse
+    speed_delta = RESPONSE_REFERENCE_MS - response_time_ms
+
+    # 2. Détection des coups spéciaux
+    if speed_delta > 0:
+        if response_time_ms < FAST_RESPONSE_THRESHOLD_MS:
+            is_special_move = True
+            applied_multipliers.append("vitesse")
+            logging.debug("Timeout Calc: Condition VITESSE remplie.")
+
+        new_letter = new_word[-1]
+
+        if previous_word and new_letter not in previous_word:
+            is_special_move = True
+            applied_multipliers.append("nouveauté")
+            logging.debug("Timeout Calc: Condition NOUVEAUTÉ remplie.")
+
+        if previous_word:
+            last_letter = previous_word[-1]
+            if abs(ord(new_letter) - ord(last_letter)) == 1:
+                is_special_move = True
+                applied_multipliers.append("proximité")
+                logging.debug("Timeout Calc: Condition PROXIMITÉ remplie.")
+
+    # 3. Calcul du nouveau combo et application du combo précédent
+    new_combo = 1
+    if is_special_move:
+        new_combo = incoming_combo + 1
+        logging.debug(f"Timeout Calc: Coup spécial détecté. Nouveau combo -> {new_combo}")
+        if incoming_combo > 1:
+            speed_delta *= incoming_combo
+            applied_multipliers.append(f"combo x{incoming_combo}")
+            logging.debug(f"Timeout Calc: Combo x{incoming_combo} appliqué au delta de vitesse.")
+    else:
+        logging.debug("Timeout Calc: Coup normal. Combo réinitialisé à 1.")
+
+    total_delta = -speed_delta
+    final_timeout = BASE_TIMEOUT_MS + total_delta
+    final_timeout = max(MIN_TIMEOUT_MS, final_timeout)
+
+    logging.info(f"Timeout final: {final_timeout}ms. Prochain combo: {new_combo}.")
+    return int(final_timeout), applied_multipliers, new_combo
+
 # --- Logique de Démarrage du Jeu ---
 def start_game_logic(background_tasks: BackgroundTasks):
     with state_lock:
-        if game_state.get("current_word") is not None:
-            return
+        if game_state.get("current_word") is not None: return
 
         ready_players = game_state["ready_players"]
         last_loser = game_state.get("last_loser")
@@ -148,13 +206,9 @@ def start_game_logic(background_tasks: BackgroundTasks):
             first_player_identifier = last_loser
         else:
             if not ready_players: return
-            sorted_players = sorted(ready_players)
-            seed_string = "".join(sorted_players)
-            player_index = hash(seed_string) % len(sorted_players)
-            first_player_identifier = sorted_players[player_index]
+            first_player_identifier = sorted(ready_players)[0]
 
         start_word = random.choice('abcdefghijklmnopqrstuvwxyz')
-        logging.info(f"Premier joueur: {first_player_identifier}, Lettre de départ: '{start_word}'")
 
         for p_id in ready_players:
             game_state["turn_counts"].setdefault(p_id, 0)
@@ -162,7 +216,8 @@ def start_game_logic(background_tasks: BackgroundTasks):
 
         payload_to_send = BallPayload(
             word=start_word,
-            timeout_ms=int(TURN_DURATION * 1000),
+            timeout_ms=BASE_TIMEOUT_MS,
+            combo_counter=1, # Le premier tour démarre un combo de 1
             incomingPlayers=game_state["players"],
             incomingTurnCounts=game_state["turn_counts"],
             incomingReadyPlayers=game_state["ready_players"],
@@ -214,7 +269,6 @@ def discover():
         else:
             network = ipaddress.ip_network(f"{OWN_HOST}/{NETMASK_CIDR}", strict=False)
             ips_to_scan = [str(ip) for ip in network.hosts()]
-        logging.info(f"Lancement de la découverte réseau sur {len(ips_to_scan)} adresses.")
         executor = ThreadPoolExecutor(max_workers=50)
         threading.Thread(target=lambda: executor.map(discover_player, ips_to_scan)).start()
     except ValueError:
@@ -222,8 +276,7 @@ def discover():
     return {"message": "Découverte réseau lancée en arrière-plan."}
 
 @app.get("/health")
-def health_check():
-    return {"status": "ok"}
+def health_check(): return {"status": "ok"}
 
 @app.get("/api/ping")
 def ping_for_discovery():
@@ -259,14 +312,11 @@ def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
     with state_lock:
         is_new_player = payload.ip and payload.ip not in game_state["players"]
         if is_new_player:
-            logging.info(f"NOUVEAU JOUEUR TROUVÉ ET AJOUTÉ: {payload.ip}")
             game_state["players"].append(payload.ip)
             game_state["turn_counts"].setdefault(payload.ip, 0)
             background_tasks.add_task(register_back, payload.ip)
 
-        current_players = set(game_state["players"])
-        new_players = set(payload.initialPlayers)
-        game_state["players"] = list(current_players.union(new_players))
+        game_state["players"] = list(set(game_state["players"]).union(set(payload.initialPlayers)))
         game_state["turn_counts"].update(payload.initialTurnCounts)
         game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(payload.initialReadyPlayers)))
         game_state["archive"] = payload.initialArchive
@@ -280,7 +330,6 @@ def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
             "allArchive": game_state["archive"]
         }
 
-# --- MODIFICATION: Logique de l'initiateur ---
 @app.post("/api/ready")
 def im_ready(background_tasks: BackgroundTasks):
     with state_lock:
@@ -295,14 +344,10 @@ def im_ready(background_tasks: BackgroundTasks):
         if known_players.issubset(ready_players) and len(known_players) > 0 and game_state.get("current_word") is None:
             initiator = sorted(list(known_players))[0]
             if my_id == initiator:
-                logging.info(f"Tous les joueurs sont prêts. En tant qu'initiateur ({my_id}), je démarre la partie.")
                 start_game_logic(background_tasks)
-            else:
-                logging.info(f"Tous les joueurs sont prêts, mais je ne suis pas l'initiateur ({initiator}). J'attends.")
 
     return {"message": "Vous êtes prêt."}
 
-# --- MODIFICATION: Logique de l'initiateur ---
 @app.post("/api/notify-ready")
 def notify_ready(payload: ReadyPayload, background_tasks: BackgroundTasks):
     with state_lock:
@@ -312,15 +357,11 @@ def notify_ready(payload: ReadyPayload, background_tasks: BackgroundTasks):
 
         known_players = set(game_state["players"])
         ready_players = set(game_state["ready_players"])
-
         if known_players.issubset(ready_players) and len(known_players) > 0 and game_state.get("current_word") is None:
             initiator = sorted(list(known_players))[0]
             my_id = game_state["own_identifier"]
             if my_id == initiator:
-                logging.info(f"Notification reçue et tous les joueurs sont prêts. En tant qu'initiateur ({my_id}), je démarre la partie.")
                 start_game_logic(background_tasks)
-            else:
-                logging.info(f"Notification reçue et tous les joueurs sont prêts, mais je ne suis pas l'initiateur ({initiator}). J'attends.")
 
     return {"message": "Notification reçue."}
 
@@ -335,11 +376,10 @@ def receive_ball(payload: BallPayload):
         game_state["turn_counts"].update(payload.incomingTurnCounts)
         game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(payload.incomingReadyPlayers)))
         game_state["history"] = payload.incomingHistory
+        game_state["combo_counter"] = payload.combo_counter # <-- On reçoit le combo
 
         game_state["turn_start_time"] = time.time()
         game_state["current_turn_timeout_ms"] = payload.timeout_ms
-
-        logging.info(f"Nouveau tour. Mot: '{payload.word}'. Timeout: {payload.timeout_ms}ms.")
 
         game_state["game_timer"] = threading.Timer(payload.timeout_ms / 1000.0, handle_loss)
         game_state["game_timer"].start()
@@ -350,6 +390,7 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
     with state_lock:
         current_word = game_state.get("current_word")
         start_time = game_state.get("turn_start_time")
+        incoming_combo = game_state.get("combo_counter", 1)
 
         if current_word is None:
             raise HTTPException(status_code=408, detail="Temps écoulé côté serveur.")
@@ -360,10 +401,14 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
             game_state["game_timer"].cancel()
 
         response_time_ms = int((time.time() - start_time) * 1000) if start_time else 0
+
+        next_timeout, multipliers, next_combo = calculate_next_timeout(response_time_ms, current_word, payload.newWord, incoming_combo)
+
         history_entry = HistoryEntry(
             player=game_state["own_identifier"],
             word=payload.newWord,
-            response_time_ms=response_time_ms
+            response_time_ms=response_time_ms,
+            applied_multipliers=multipliers
         )
         game_state["history"].append(history_entry)
 
@@ -371,19 +416,18 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
 
         next_player_identifier = None
         if other_players:
+            # ... (logique de sélection du joueur sain inchangée) ...
             candidates = list(other_players)
             while candidates:
                 min_turns = min(game_state["turn_counts"].get(p, 0) for p in candidates)
                 eligible_players = [p for p in candidates if game_state["turn_counts"].get(p, 0) == min_turns]
                 potential_next_player = random.choice(eligible_players)
-
                 try:
                     requests.get(f"http://{potential_next_player}/health", timeout=0.5)
                     next_player_identifier = potential_next_player
                     break
                 except requests.RequestException:
                     candidates.remove(potential_next_player)
-
             if not next_player_identifier:
                 next_player_identifier = game_state["own_identifier"]
         else:
@@ -393,7 +437,8 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
             game_state["turn_counts"][next_player_identifier] += 1
             next_payload = BallPayload(
                 word=payload.newWord,
-                timeout_ms=int(TURN_DURATION * 1000),
+                timeout_ms=next_timeout,
+                combo_counter=next_combo,
                 incomingPlayers=game_state["players"],
                 incomingTurnCounts=game_state["turn_counts"],
                 incomingReadyPlayers=game_state["ready_players"],
@@ -404,9 +449,11 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
         else:
             simulated_word = payload.newWord + random.choice('abcdefghijklmnopqrstuvwxyz')
             game_state["turn_counts"][game_state["own_identifier"]] += 1
+            ia_next_timeout, _, ia_next_combo = calculate_next_timeout(50, payload.newWord, simulated_word, next_combo)
             next_payload = BallPayload(
                 word=simulated_word,
-                timeout_ms=int(TURN_DURATION * 1000),
+                timeout_ms=ia_next_timeout,
+                combo_counter=ia_next_combo,
                 incomingPlayers=game_state["players"],
                 incomingTurnCounts=game_state["turn_counts"],
                 incomingReadyPlayers=game_state["ready_players"],
@@ -419,13 +466,10 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
 
 @app.post("/api/game-over")
 def game_over(payload: GameOverPayload):
-    logging.info(f"Notification de fin de partie reçue. Perdant: {payload.loser}, Raison: {payload.reason}")
     with state_lock:
         game_state["last_loser"] = payload.loser
         if game_state.get("history"):
-            logging.info(f"Archivage de la partie terminée avec {len(game_state['history'])} coups.")
             game_state["archive"].append(list(game_state["history"]))
-
     reset_local_game_state()
     return {"message": "OK"}
 
