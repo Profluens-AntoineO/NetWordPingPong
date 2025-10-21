@@ -103,7 +103,6 @@ def send_ball_in_background(player_identifier: str, payload: dict):
     logging.info(f"Tâche de fond: Envoi de la balle à {player_identifier}.")
     try:
         requests.post(f"http://{player_identifier}/api/receive-ball", json=payload, timeout=2)
-        logging.info(f"Tâche de fond: Balle envoyée avec succès à {player_identifier}.")
     except requests.RequestException as e:
         logging.error(f"Tâche de fond: Erreur en passant la balle à {player_identifier}: {e}")
         broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': f'Impossible de contacter {player_identifier}'})
@@ -126,22 +125,16 @@ def register_back(player_identifier: str):
 def start_game_logic(background_tasks: BackgroundTasks):
     with state_lock:
         if game_state.get("current_word") is not None:
-            logging.warning("Tentative de démarrage d'une partie déjà en cours. Annulation.")
             return
-
         logging.info("Démarrage effectif de la partie...")
         start_word = random.choice('abcdefghijklmnopqrstuvwxyz')
         all_players = game_state["players"]
         if not all_players:
             return
-
         first_player_identifier = random.choice(all_players)
-        logging.info(f"Premier joueur choisi: {first_player_identifier}")
-
         for p_id in all_players:
             game_state["turn_counts"].setdefault(p_id, 0)
         game_state["turn_counts"][first_player_identifier] += 1
-
         payload_to_send = BallPayload(
             word=start_word,
             incomingPlayers=game_state["players"],
@@ -149,7 +142,6 @@ def start_game_logic(background_tasks: BackgroundTasks):
             incomingReadyPlayers=game_state["ready_players"]
         )
         game_state["current_word"] = "game_starting"
-
     if first_player_identifier == game_state["own_identifier"]:
         receive_ball(payload_to_send)
     else:
@@ -157,22 +149,32 @@ def start_game_logic(background_tasks: BackgroundTasks):
 
 # --- API Endpoints ---
 
+# --- MODIFICATION CRITIQUE DANS CETTE FONCTION ---
 def discover_player(ip_to_try: str):
+    """Tente de contacter un joueur sur une IP donnée sur le port standard du jeu."""
     if ip_to_try == OWN_HOST:
         return
+
     player_identifier = f"{ip_to_try}:{PORT}"
     logging.debug(f"Tentative de découverte sur {player_identifier}...")
+
+    # On vérifie si le joueur est déjà connu AVANT de faire la requête réseau
+    with state_lock:
+        if player_identifier in game_state["players"]:
+            logging.debug(f"Joueur {player_identifier} déjà connu. Scan suivant.")
+            return
+
     try:
         with state_lock:
-            if player_identifier in game_state["players"]:
-                return
             payload = {
                 "ip": game_state["own_identifier"],
                 "initialPlayers": game_state["players"],
                 "initialTurnCounts": game_state["turn_counts"],
                 "initialReadyPlayers": game_state["ready_players"]
             }
+
         response = requests.post(f"http://{player_identifier}/api/register", json=payload, timeout=0.5)
+
         if response.status_code == 200:
             data = response.json()
             logging.info(f"Joueur découvert avec succès : {data.get('identity')}")
@@ -181,17 +183,22 @@ def discover_player(ip_to_try: str):
                 game_state["turn_counts"].update(data.get("allTurnCounts", {}))
                 game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(data.get("allReadyPlayers", []))))
     except requests.RequestException:
-        pass
+        pass # C'est normal que la plupart des requêtes échouent
 
 @app.post("/api/discover", status_code=202)
 def discover():
     try:
-        network = ipaddress.ip_network(f"{OWN_HOST}/{NETMASK_CIDR}", strict=False)
-        ips_to_scan = [str(ip) for ip in network.hosts()]
-        logging.info(f"Lancement de la découverte réseau sur {len(ips_to_scan)} adresses.")
+        if OWN_HOST == "localhost":
+            ips_to_scan = ["localhost"]
+            logging.info("Lancement de la découverte en mode local.")
+        else:
+            network = ipaddress.ip_network(f"{OWN_HOST}/{NETMASK_CIDR}", strict=False)
+            ips_to_scan = [str(ip) for ip in network.hosts()]
+            logging.info(f"Lancement de la découverte réseau sur {len(ips_to_scan)} adresses.")
     except ValueError:
         logging.error(f"Erreur: L'IP '{OWN_HOST}' ou le masque '{NETMASK_CIDR}' est invalide.")
         return {"message": "Erreur de configuration réseau."}
+
     executor = ThreadPoolExecutor(max_workers=50)
     threading.Thread(target=lambda: executor.map(discover_player, ips_to_scan)).start()
     return {"message": "Découverte réseau lancée en arrière-plan."}
@@ -214,10 +221,8 @@ def get_players():
             "ready_players": list(game_state.get("ready_players", []))
         }
 
-# --- ENDPOINT QUI MANQUAIT ---
 @app.post("/api/register")
 def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
-    """Enregistre un joueur et lance un handshake en retour si c'est un nouveau joueur."""
     with state_lock:
         is_new_player = payload.ip and payload.ip not in game_state["players"]
 
@@ -313,14 +318,12 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
                 try:
                     requests.get(f"http://{potential_next_player}/health", timeout=0.5)
                     next_player_identifier = potential_next_player
-                    logging.info(f"Joueur suivant (sain) choisi: {next_player_identifier}")
                     break
                 except requests.RequestException:
                     logging.warning(f"Le joueur {potential_next_player} n'a pas répondu au health check. Retrait des candidats pour ce tour.")
                     candidates.remove(potential_next_player)
 
             if not next_player_identifier:
-                logging.error("Aucun autre joueur n'a répondu au health check. Passage en mode solo pour ce tour.")
                 next_player_identifier = game_state["own_identifier"]
         else:
             next_player_identifier = game_state["own_identifier"]
@@ -337,7 +340,6 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
             background_tasks.add_task(send_ball_in_background, next_player_identifier, next_payload.dict())
         else:
             simulated_word = payload.newWord + random.choice('abcdefghijklmnopqrstuvwxyz')
-            logging.info(f"Mode solo/fallback: L'IA répond avec '{simulated_word}'.")
             game_state["turn_counts"][game_state["own_identifier"]] += 1
             next_payload = BallPayload(
                 word=simulated_word,
