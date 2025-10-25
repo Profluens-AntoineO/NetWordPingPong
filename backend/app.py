@@ -1,19 +1,21 @@
+
 import logging
 import os
 import threading
 import random
 import ipaddress
 import time
+import json
+import asyncio
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional
 
 import requests
 import uvicorn
-from fastapi import FastAPI, Body, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Body, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-
-from backend.next_timeout_computation import calculate_next_timeout
 
 # --- Configuration ---
 logging.basicConfig(
@@ -29,21 +31,74 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Variables d'environnement et Constantes de Jeu ---
+# --- Game Constants ---
 OWN_HOST = os.getenv("OWN_HOST", "localhost")
 NETMASK_CIDR = os.getenv("NETMASK_CIDR", "24")
 PORT = 5000
 
-BASE_TIMEOUT_MS = 60000
-MIN_TIMEOUT_MS = 2000
-RESPONSE_REFERENCE_MS = 10000
-FAST_RESPONSE_THRESHOLD_MS = 3000
+BASE_TIMEOUT_MS = 15000
+MIN_TIMEOUT_MS = 3000
+MAX_TIMEOUT_MS = 60000
 
-FAST_RESPONSE_MULTIPLIER = 1.5
-NOVELTY_MULTIPLIER = 1.2
-PROXIMITY_MULTIPLIER = 1.2
+VOWELS = "aeiouy"
+VOWEL_POWER_RECHARGE_RATE = 0.25
+MAX_VOWEL_POWER = 2.0
+CURSE_THRESHOLD = 3
 
-# --- Modèles Pydantic ---
+PAD_CHARGE_THRESHOLD = 3
+LETTER_TO_PAD = {
+    'a': '2', 'b': '2', 'c': '2',
+    'd': '3', 'e': '3', 'f': '3',
+    'g': '4', 'h': '4', 'i': '4',
+    'j': '5', 'k': '5', 'l': '5',
+    'm': '6', 'n': '6', 'o': '6',
+    'p': '7', 'q': '7', 'r': '7', 's': '7',
+    't': '8', 'u': '8', 'v': '8',
+    'w': '9', 'x': '9', 'y': '9', 'z': '9',
+}
+PAD_COLUMNS = {
+    '*': ['7', '4'],       # Purge
+    '0': ['2', '5', '8'],       # Recharge
+    '#': ['3', '6', '9'],       # Attack
+}
+
+# --- WebSocket Manager ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast_state(self):
+        with state_lock:
+            full_state = {
+                "self": game_state.get("own_identifier"),
+                "players": list(game_state.get("players", [])),
+                "ready_players": list(game_state.get("ready_players", [])),
+                "history": [entry.dict() for entry in game_state.get("history", [])],
+                "archive": [[entry.dict() for entry in game] for game in game_state.get("archive", [])],
+                "word": game_state.get("current_word"),
+                "timeout_ms": game_state.get("current_turn_timeout_ms"),
+                "player_vowel_powers": game_state.get("player_vowel_powers", {}),
+                "cursed_letters": game_state.get("cursed_letters", []),
+                "player_phone_pads": game_state.get("player_phone_pads", {})
+            }
+        message = json.dumps(full_state)
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(message)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
+
+# --- Pydantic Models ---
 class HistoryEntry(BaseModel):
     player: str
     word: str
@@ -56,14 +111,22 @@ class RegisterPayload(BaseModel):
     initialTurnCounts: Optional[Dict[str, int]] = Field(default_factory=dict)
     initialReadyPlayers: Optional[List[str]] = Field(default_factory=list)
     initialArchive: Optional[List[List[HistoryEntry]]] = Field(default_factory=list)
+    initialPlayerVowelPowers: Optional[Dict[str, Dict[str, float]]] = Field(default_factory=dict)
+    initialCursedLetters: Optional[List[str]] = Field(default_factory=list)
+    initialPlayerPhonePads: Optional[Dict[str, Dict[str, int]]] = Field(default_factory=dict)
 
 class ReadyPayload(BaseModel):
     player_id: str
 
+class ComboPayload(BaseModel):
+    combo_key: str
+
 class BallPayload(BaseModel):
     word: str
     timeout_ms: int
-    combo_counter: int
+    player_vowel_powers: Dict[str, Dict[str, float]]
+    cursed_letters: List[str]
+    player_phone_pads: Dict[str, Dict[str, int]]
     incomingPlayers: List[str]
     incomingTurnCounts: Dict[str, int]
     incomingReadyPlayers: List[str]
@@ -71,33 +134,40 @@ class BallPayload(BaseModel):
 
 class PassBallPayload(BaseModel):
     newWord: str
+    client_timestamp_ms: int
 
 class GameOverPayload(BaseModel):
     loser: str
     reason: Optional[str] = "Raison inconnue"
 
-# --- État du Jeu ---
+# --- Game State ---
 game_state: Dict = {}
 state_lock = threading.RLock()
 
-# --- Fonctions Utilitaires ---
+# --- State Reset Functions ---
+def get_new_phone_pad():
+    return {str(i): 0 for i in range(2, 10)}
+
 def reset_local_game_state():
-    """Réinitialise l'état pour une nouvelle partie, en conservant l'archive et le dernier perdant."""
-    logging.info("Réinitialisation de l'état du jeu local pour une nouvelle partie.")
     with state_lock:
         if game_state.get("game_timer"):
             game_state["game_timer"].cancel()
         game_state["current_word"] = None
         game_state["game_timer"] = None
+        game_state["current_turn_timeout_ms"] = None
+    logging.info("Local game state (turn) reset.")
+
+async def reset_full_game_state_and_broadcast():
+    with state_lock:
+        reset_local_game_state()
         game_state["ready_players"] = []
         game_state["history"] = []
-        game_state["turn_start_time"] = None
-        game_state["combo_counter"] = 1
-        # --- CORRECTION AJOUTÉE ---
-        # On s'assure que le timeout du tour précédent est bien effacé.
-        game_state["current_turn_timeout_ms"] = None
+        game_state["player_vowel_powers"] = {p_id: {v: 1.0 for v in VOWELS} for p_id in game_state.get("players", [])}
+        game_state["cursed_letters"] = []
+        game_state["player_phone_pads"] = {p_id: get_new_phone_pad() for p_id in game_state.get("players", [])}
+    await manager.broadcast_state()
 
-def broadcast(endpoint: str, payload: dict):
+def broadcast_sync(endpoint: str, payload: dict):
     with state_lock:
         players_to_contact = [p_id for p_id in game_state.get("players", []) if p_id != game_state.get("own_identifier")]
     def post_request(player_identifier):
@@ -108,263 +178,459 @@ def broadcast(endpoint: str, payload: dict):
     with ThreadPoolExecutor(max_workers=20) as executor:
         executor.map(post_request, players_to_contact)
 
-def handle_loss():
-    timeout = game_state.get("current_turn_timeout_ms", BASE_TIMEOUT_MS) / 1000.0
-    broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': f'Temps écoulé ({timeout}s)'})
-    reset_local_game_state()
+def register_back(player_id_to_register_with: str):
+    '''Posts this node's state to the other player's /register endpoint.'''
+    with state_lock:
+        my_id = game_state["own_identifier"]
+        payload = {
+            "ip": my_id,
+            "initialPlayers": game_state["players"],
+            "initialTurnCounts": game_state["turn_counts"],
+            "initialReadyPlayers": game_state["ready_players"],
+            "initialArchive": [[e.dict() for e in game] for game in game_state["archive"]],
+            "initialPlayerVowelPowers": game_state["player_vowel_powers"],
+            "initialCursedLetters": game_state["cursed_letters"],
+            "initialPlayerPhonePads": game_state["player_phone_pads"]
+        }
+    try:
+        requests.post(f"http://{player_id_to_register_with}/api/register", json=payload, timeout=1)
+        logging.info(f"Registered back with {player_id_to_register_with}")
+    except requests.RequestException:
+        logging.warning(f"Failed to register back with {player_id_to_register_with}")
 
-# --- Événement de Démarrage ---
+def discover_peers():
+    '''Scans the network for other players and registers with them.'''
+    with state_lock:
+        my_id = game_state["own_identifier"]
+        own_ip = my_id.split(':')[0]
+        try:
+            network = ipaddress.ip_network(f'{own_ip}/{NETMASK_CIDR}', strict=False)
+        except ValueError:
+            logging.error(f"Invalid OWN_HOST/NETMASK_CIDR: {own_ip}/{NETMASK_CIDR}")
+            return
+
+    def ping_and_initiate_register(ip):
+        if str(ip) == own_ip:
+            return
+        
+        target_id = f"{ip}:{PORT}"
+        with state_lock:
+            if target_id in game_state["players"]:
+                return # Already know this player
+
+        try:
+            ping_response = requests.get(f"http://{target_id}/api/ping", timeout=0.5)
+            if ping_response.status_code == 200:
+                logging.info(f"Found potential peer: {target_id}")
+                register_back(target_id)
+
+        except requests.RequestException:
+            pass  # Ignore nodes that don't respond
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        executor.map(ping_and_initiate_register, network.hosts())
+    
+    asyncio.run(manager.broadcast_state())
+
+# --- Core Logic ---
+
 @app.on_event("startup")
 def on_startup():
     with state_lock:
-        game_state["own_identifier"] = f"{OWN_HOST}:{PORT}"
-        game_state["players"] = [game_state["own_identifier"]]
-        game_state["turn_counts"] = {game_state["own_identifier"]: 0}
+        my_id = f"{OWN_HOST}:{PORT}"
+        game_state["own_identifier"] = my_id
+        game_state["players"] = [my_id]
+        game_state["turn_counts"] = {my_id: 0}
         game_state["ready_players"] = []
-        game_state["current_word"] = None
-        game_state["game_timer"] = None
-        game_state["last_loser"] = None
-        game_state["history"] = []
         game_state["archive"] = []
-        game_state["turn_start_time"] = None
-        game_state["combo_counter"] = 1
-    logging.info(f"Serveur démarré. Identité: {game_state['own_identifier']}")
+        game_state["player_vowel_powers"] = {my_id: {v: 1.0 for v in VOWELS}}
+        game_state["cursed_letters"] = []
+        game_state["player_phone_pads"] = {my_id: get_new_phone_pad()}
+        game_state["last_loser"] = None
+        game_state["attack_combo_player"] = None
+    logging.info(f"Server started. Identity: {my_id}")
 
-# --- Tâches de Fond ---
-def send_ball_in_background(player_identifier: str, payload: dict):
-    try:
-        requests.post(f"http://{player_identifier}/api/receive-ball", json=payload, timeout=2)
-    except requests.RequestException:
-        broadcast('/api/game-over', {'loser': game_state.get("own_identifier"), 'reason': f'Impossible de contacter {player_identifier}'})
+async def handle_loss():
+    with state_lock:
+        loser_id = game_state.get("own_identifier")
+        current_word = game_state.get("current_word")
+        if not (loser_id and current_word and current_word != "game_starting"):
+            return
 
-def register_back(player_identifier: str):
-    try:
-        with state_lock:
-            payload = {
-                "ip": game_state["own_identifier"],
-                "initialPlayers": game_state["players"],
-                "initialTurnCounts": game_state["turn_counts"],
-                "initialReadyPlayers": game_state["ready_players"],
-                "initialArchive": game_state["archive"]
-            }
-        requests.post(f"http://{player_identifier}/api/register", json=payload, timeout=1)
-    except requests.RequestException:
-        pass
+        logging.info(f"Player {loser_id} lost due to timeout on word {current_word}")
+        broadcast_sync("/api/game-over", {"loser": loser_id, "reason": "timeout"})
+        await game_over(GameOverPayload(loser=loser_id, reason="timeout"))
 
-# --- Logique de Démarrage du Jeu ---
+def calculate_next_timeout(response_time_ms: int, new_word: str, player_vowel_power: Dict[str, float], cursed_malus: bool = False, pad_combo_malus: bool = False) -> (int, List[str], Dict[str, float]):
+    speed_bonus = (5000 - response_time_ms) * 1.5
+    new_letter = new_word[-1]
+    vowel_bonus = 0
+    applied_multipliers = []
+    new_player_vowel_power = player_vowel_power.copy()
+
+    if new_letter in VOWELS:
+        power_before_use = new_player_vowel_power.get(new_letter, 1.0)
+        vowel_bonus = 7500 * power_before_use
+        new_player_vowel_power[new_letter] = power_before_use / 2
+        if vowel_bonus > 0: applied_multipliers.append(f"voyelle ({power_before_use:.0%})")
+    else:
+        recharged = False
+        for v in VOWELS:
+            if new_player_vowel_power.get(v, 1.0) < MAX_VOWEL_POWER:
+                recharged = True
+                new_player_vowel_power[v] = min(MAX_VOWEL_POWER, new_player_vowel_power.get(v, 1.0) + VOWEL_POWER_RECHARGE_RATE)
+        if recharged: applied_multipliers.append("recharge")
+
+    final_timeout = BASE_TIMEOUT_MS + speed_bonus + vowel_bonus
+    if cursed_malus: final_timeout *= 0.25; applied_multipliers.append("maudite")
+    if pad_combo_malus: final_timeout *= 0.5; applied_multipliers.append("combo #")
+    if speed_bonus > 0: applied_multipliers.append("vitesse")
+
+    final_timeout = max(MIN_TIMEOUT_MS, min(final_timeout, MAX_TIMEOUT_MS))
+    return int(final_timeout), applied_multipliers, new_player_vowel_power
+
 def start_game_logic(background_tasks: BackgroundTasks):
     with state_lock:
         if game_state.get("current_word") is not None: return
-
+        
         ready_players = game_state["ready_players"]
-        last_loser = game_state.get("last_loser")
-        first_player_identifier = None
+        game_state["player_vowel_powers"] = {p_id: {v: 1.0 for v in VOWELS} for p_id in ready_players}
+        game_state["cursed_letters"] = []
+        game_state["player_phone_pads"] = {p_id: get_new_phone_pad() for p_id in ready_players}
 
-        if last_loser and last_loser in ready_players:
-            first_player_identifier = last_loser
-        else:
-            if not ready_players: return
-            first_player_identifier = sorted(ready_players)[0]
-
+        first_player_identifier = sorted(ready_players)[0]
         start_word = random.choice('abcdefghijklmnopqrstuvwxyz')
-
-        for p_id in ready_players:
-            game_state["turn_counts"].setdefault(p_id, 0)
+        
+        for p_id in ready_players: game_state["turn_counts"].setdefault(p_id, 0)
         game_state["turn_counts"][first_player_identifier] += 1
 
         payload_to_send = BallPayload(
-            word=start_word,
-            timeout_ms=BASE_TIMEOUT_MS,
-            combo_counter=1,
+            word=start_word, timeout_ms=BASE_TIMEOUT_MS, 
+            player_vowel_powers=game_state["player_vowel_powers"],
+            cursed_letters=game_state["cursed_letters"],
+            player_phone_pads=game_state["player_phone_pads"],
+            incomingPlayers=game_state["players"], 
+            incomingTurnCounts=game_state["turn_counts"],
+            incomingReadyPlayers=game_state["ready_players"], 
+            incomingHistory=[]
+        )
+        game_state["current_word"] = "game_starting"
+
+    if first_player_identifier == game_state["own_identifier"]:
+        background_tasks.add_task(receive_ball, payload_to_send)
+    else:
+        background_tasks.add_task(send_ball_in_background, first_player_identifier, payload_to_send.dict())
+
+async def play_computer_turn_and_return(ball_from_human: BallPayload):
+    '''Computer plays a turn by adding a random letter and passes the ball back to the human.'''
+    await asyncio.sleep(1)  # Simulate thinking
+
+    with state_lock:
+        computer_id = "computer"
+        base_word = ball_from_human.word
+
+        # Computer chooses a random letter to add, just like a human would
+        new_letter = random.choice('abcdefghijklmnopqrstuvwxyz')
+        computer_new_word = base_word + new_letter
+
+        logging.info(f"Computer chose letter '{new_letter}' to form '{computer_new_word}'")
+
+        # Update history with computer's move
+        history_entry = HistoryEntry(
+            player=computer_id,
+            word=computer_new_word,
+            response_time_ms=random.randint(300, 900),
+            applied_multipliers=["ordinateur"]
+        )
+        game_state["history"].append(history_entry)
+        game_state["turn_counts"].setdefault(computer_id, 0)
+        game_state["turn_counts"][computer_id] += 1
+
+        # Prepare ball for human
+        ball_for_human = BallPayload(
+            word=computer_new_word,
+            timeout_ms=BASE_TIMEOUT_MS,  # Simple timeout for now
+            player_vowel_powers=game_state["player_vowel_powers"],
+            cursed_letters=game_state["cursed_letters"],
+            player_phone_pads=game_state["player_phone_pads"],
             incomingPlayers=game_state["players"],
             incomingTurnCounts=game_state["turn_counts"],
             incomingReadyPlayers=game_state["ready_players"],
             incomingHistory=game_state["history"]
         )
-        game_state["current_word"] = "game_starting"
 
-    if first_player_identifier == game_state["own_identifier"]:
-        receive_ball(payload_to_send)
-    else:
-        background_tasks.add_task(send_ball_in_background, first_player_identifier, payload_to_send.dict())
+        # Pass ball to human
+        await receive_ball(ball_for_human)
+
+async def initiate_rematch_logic(background_tasks: BackgroundTasks):
+    with state_lock:
+        # Archive the last game's history if it exists
+        if game_state.get("history"):
+            if game_state["history"]:
+                game_state["archive"].append(list(game_state["history"]))
+        
+        # Reset game-specific state, but keep players
+        reset_local_game_state()
+        game_state["history"] = []
+        game_state["last_loser"] = None
+        game_state["attack_combo_player"] = None
+        
+        current_players = game_state.get("players", [])
+        game_state["ready_players"] = list(current_players)
+        
+        game_state["player_vowel_powers"] = {p_id: {v: 1.0 for v in VOWELS} for p_id in current_players}
+        game_state["cursed_letters"] = []
+        game_state["player_phone_pads"] = {p_id: get_new_phone_pad() for p_id in current_players}
+
+        # The first player in the sorted list is responsible for starting the game
+        initiator = sorted(current_players)[0]
+        my_id = game_state["own_identifier"]
+        if my_id == initiator:
+            start_game_logic(background_tasks)
+
+    await manager.broadcast_state()
 
 # --- API Endpoints ---
 
-def discover_player(ip_to_try: str):
-    if ip_to_try == OWN_HOST: return
-    player_identifier = f"{ip_to_try}:{PORT}"
-    ping_url = f"http://{player_identifier}/api/ping"
+@app.post("/api/discover")
+async def discover(background_tasks: BackgroundTasks):
+    '''Endpoint to trigger network discovery of other players.'''
+    background_tasks.add_task(discover_peers)
+    return {"message": "Discovery process started."}
+
+@app.post("/api/power-up")
+async def power_up():
     with state_lock:
-        if player_identifier in game_state["players"]: return
+        my_id = game_state["own_identifier"]
+        my_pad = game_state["player_phone_pads"].get(my_id)
+        if not my_pad:
+            raise HTTPException(status_code=404, detail="Player pad not found.")
 
-    try:
-        response_ping = requests.get(ping_url, timeout=0.3)
-        if response_ping.status_code == 200 and response_ping.json().get("message") == "pong":
-            with state_lock:
-                payload_register = {
-                    "ip": game_state["own_identifier"], "initialPlayers": game_state["players"],
-                    "initialTurnCounts": game_state["turn_counts"], "initialReadyPlayers": game_state["ready_players"],
-                    "initialArchive": game_state["archive"]
-                }
-            response_register = requests.post(f"http://{player_identifier}/api/register", json=payload_register, timeout=0.5)
-            if response_register.status_code == 200:
-                data = response_register.json()
-                with state_lock:
-                    game_state["players"] = list(set(game_state["players"]).union(set(data.get("allPlayers", []))))
-                    game_state["turn_counts"].update(data.get("allTurnCounts", {}))
-                    game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(data.get("allReadyPlayers", []))))
-                    game_state["archive"] = data.get("allArchive", [])
-    except requests.RequestException:
-        pass
+        is_ready = all(my_pad.get(str(num), 0) >= 1 for num in range(2, 10))
+        if not is_ready:
+            raise HTTPException(status_code=400, detail="Power-up not ready.")
 
-@app.post("/api/discover", status_code=202)
-def discover():
-    try:
-        if OWN_HOST == "localhost":
-            ips_to_scan = ["localhost"]
-        else:
-            network = ipaddress.ip_network(f"{OWN_HOST}/{NETMASK_CIDR}", strict=False)
-            ips_to_scan = [str(ip) for ip in network.hosts()]
-        executor = ThreadPoolExecutor(max_workers=50)
-        threading.Thread(target=lambda: executor.map(discover_player, ips_to_scan)).start()
-    except ValueError:
-        return {"message": "Erreur de configuration réseau."}
-    return {"message": "Découverte réseau lancée en arrière-plan."}
+        logging.info(f"Player {my_id} triggered Power-Up!")
+        game_state["power_up_multiplier"] = 10
+        game_state["protected_player"] = my_id
+        game_state["current_turn_timeout_ms"] = MAX_TIMEOUT_MS
+        
+        # Reset all pads
+        game_state["player_phone_pads"][my_id] = get_new_phone_pad()
 
-@app.get("/health")
-def health_check(): return {"status": "ok"}
+    await manager.broadcast_state()
+    return {"message": "Power-up activated!"}
 
-@app.get("/api/ping")
-def ping_for_discovery():
+@app.post("/api/combo")
+async def trigger_combo(payload: ComboPayload):
     with state_lock:
-        return {"message": "pong", "identity": game_state.get("own_identifier")}
+        my_id = game_state["own_identifier"]
+        combo_key = payload.combo_key
+        
+        if combo_key not in PAD_COLUMNS:
+            raise HTTPException(status_code=400, detail="Invalid combo key.")
 
-# --- MODIFICATION: get-ball ne renvoie plus l'historique ---
-@app.get("/api/get-ball")
-def get_ball():
-    with state_lock:
-        return {
-            "word": game_state.get("current_word"),
-            "timeout_ms": game_state.get("current_turn_timeout_ms"),
-        }
+        my_pad = game_state["player_phone_pads"].get(my_id)
+        if not my_pad:
+            raise HTTPException(status_code=404, detail="Player pad not found.")
 
-# --- MODIFICATION: players renvoie maintenant l'historique et l'archive ---
-@app.get("/api/players")
-def get_players():
-    with state_lock:
-        return {
-            "self": game_state.get("own_identifier"),
-            "players": list(game_state.get("players", [])),
-            "turn_counts": dict(game_state.get("turn_counts", {})),
-            "ready_players": list(game_state.get("ready_players", [])),
-            "history": list(game_state.get("history", [])),
-            "archive": list(game_state.get("archive", [])),
-        }
+        column_nums = PAD_COLUMNS[combo_key]
+        is_combo_ready = all(my_pad.get(num, 0) >= 1 for num in column_nums)
+
+        if not is_combo_ready:
+            raise HTTPException(status_code=400, detail="Combo not ready.")
+
+        logging.info(f"Player {my_id} triggered combo '{combo_key}'!")
+        
+        if combo_key == '*':
+            game_state["cursed_letters"] = []
+        elif combo_key == '0':
+            for v in VOWELS:
+                game_state["player_vowel_powers"][my_id][v] = MAX_VOWEL_POWER
+        elif combo_key == '#':
+            game_state["attack_combo_player"] = my_id
+        
+        for num in column_nums:
+            if num in my_pad:
+                my_pad[num] = 0
+        
+    await manager.broadcast_state()
+    return {"message": f"Combo {combo_key} activated."}
 
 @app.post("/api/register")
-def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
+async def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
     with state_lock:
-        is_new_player = payload.ip and payload.ip not in game_state["players"]
-        if is_new_player:
-            game_state["players"].append(payload.ip)
-            game_state["turn_counts"].setdefault(payload.ip, 0)
-            background_tasks.add_task(register_back, payload.ip)
-
+        new_player_id = payload.ip
+        if new_player_id and new_player_id not in game_state["players"]:
+            game_state["players"].append(new_player_id)
+            game_state["turn_counts"].setdefault(new_player_id, 0)
+            game_state["player_vowel_powers"][new_player_id] = {v: 1.0 for v in VOWELS}
+            game_state["player_phone_pads"][new_player_id] = get_new_phone_pad()
+            background_tasks.add_task(register_back, new_player_id)
+        
         game_state["players"] = list(set(game_state["players"]).union(set(payload.initialPlayers)))
         game_state["turn_counts"].update(payload.initialTurnCounts)
         game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(payload.initialReadyPlayers)))
-        game_state["archive"] = payload.initialArchive
+        if len(payload.initialArchive) > len(game_state["archive"]):
+            game_state["archive"] = payload.initialArchive
+        
+        game_state["player_vowel_powers"].update(payload.initialPlayerVowelPowers)
+        game_state["cursed_letters"] = list(set(game_state["cursed_letters"]).union(set(payload.initialCursedLetters)))
+        game_state["player_phone_pads"].update(payload.initialPlayerPhonePads)
 
-        return {
-            "message": "Enregistré", "identity": game_state["own_identifier"],
-            "allPlayers": game_state["players"], "allTurnCounts": game_state["turn_counts"],
-            "allReadyPlayers": game_state["ready_players"], "allArchive": game_state["archive"]
-        }
+    await manager.broadcast_state()
+    return {
+        "message": "Registered",
+        "allPlayers": game_state["players"], 
+        "allTurnCounts": game_state["turn_counts"],
+        "allReadyPlayers": game_state["ready_players"], 
+        "allArchive": [ [e.dict() for e in game] for game in game_state["archive"]],
+        "allPlayerVowelPowers": game_state["player_vowel_powers"],
+        "allCursedLetters": game_state["cursed_letters"],
+        "allPlayerPhonePads": game_state["player_phone_pads"]
+    }
 
 @app.post("/api/ready")
-def im_ready(background_tasks: BackgroundTasks):
+async def im_ready(background_tasks: BackgroundTasks):
     with state_lock:
         my_id = game_state["own_identifier"]
         if my_id not in game_state["ready_players"]:
             game_state["ready_players"].append(my_id)
-            broadcast('/api/notify-ready', {"player_id": my_id})
+
+        # If I am the only connected player and I am ready, assume it's a solo game.
+        if len(game_state["players"]) == 1 and game_state["players"][0] == my_id:
+            computer_id = "computer"
+            if computer_id not in game_state["players"]:
+                game_state["players"].append(computer_id)
+                game_state["turn_counts"][computer_id] = 0
+                game_state["player_vowel_powers"][computer_id] = {v: 1.0 for v in VOWELS}
+                game_state["player_phone_pads"][computer_id] = get_new_phone_pad()
+            if computer_id not in game_state["ready_players"]:
+                game_state["ready_players"].append(computer_id)
+        else:
+            broadcast_sync('/api/notify-ready', {"player_id": my_id})
 
         known_players = set(game_state["players"])
         ready_players = set(game_state["ready_players"])
-
-        if known_players.issubset(ready_players) and len(known_players) > 0 and game_state.get("current_word") is None:
+        
+        if known_players.issubset(ready_players) and len(ready_players) >= 1 and game_state.get("current_word") is None:
             initiator = sorted(list(known_players))[0]
-            if my_id == initiator:
+            if my_id == initiator or "computer" in known_players:
                 start_game_logic(background_tasks)
-
-    return {"message": "Vous êtes prêt."}
+            
+    await manager.broadcast_state()
+    return {"message": "You are ready."}
 
 @app.post("/api/notify-ready")
-def notify_ready(payload: ReadyPayload, background_tasks: BackgroundTasks):
+async def notify_ready(payload: ReadyPayload, background_tasks: BackgroundTasks):
     with state_lock:
         player_id = payload.player_id
         if player_id not in game_state["ready_players"]:
             game_state["ready_players"].append(player_id)
-
+        
         known_players = set(game_state["players"])
         ready_players = set(game_state["ready_players"])
-        if known_players.issubset(ready_players) and len(known_players) > 0 and game_state.get("current_word") is None:
+        if known_players.issubset(ready_players) and len(ready_players) >= 1 and game_state.get("current_word") is None:
             initiator = sorted(list(known_players))[0]
             my_id = game_state["own_identifier"]
             if my_id == initiator:
                 start_game_logic(background_tasks)
 
-    return {"message": "Notification reçue."}
+    await manager.broadcast_state()
+    return {"message": "Notification received."}
 
 @app.post("/api/receive-ball")
-def receive_ball(payload: BallPayload):
+async def receive_ball(payload: BallPayload):
     with state_lock:
-        if game_state.get("current_word") is not None and game_state.get("current_word") != "game_starting":
-            raise HTTPException(status_code=409, detail="Déjà en train de jouer un tour.")
+        reset_local_game_state()
 
-        game_state["current_word"] = payload.word
-        game_state["players"] = list(set(game_state["players"]).union(set(payload.incomingPlayers)))
-        game_state["turn_counts"].update(payload.incomingTurnCounts)
-        game_state["ready_players"] = list(set(game_state["ready_players"]).union(set(payload.incomingReadyPlayers)))
-        game_state["history"] = payload.incomingHistory
-        game_state["combo_counter"] = payload.combo_counter
-
-        game_state["turn_start_time"] = time.time()
-        game_state["current_turn_timeout_ms"] = payload.timeout_ms
-
-        game_state["game_timer"] = threading.Timer(payload.timeout_ms / 1000.0, handle_loss)
+        game_state.update({
+            "current_word": payload.word,
+            "players": list(set(game_state.get("players", [])).union(set(payload.incomingPlayers))),
+            "ready_players": list(set(game_state.get("ready_players", [])).union(set(payload.incomingReadyPlayers))),
+            "player_vowel_powers": payload.player_vowel_powers,
+            "cursed_letters": payload.cursed_letters,
+            "player_phone_pads": payload.player_phone_pads,
+            "history": payload.incomingHistory,
+            "turn_start_time": time.time(),
+            "current_turn_timeout_ms": payload.timeout_ms
+        })
+        
+        game_state["game_timer"] = threading.Timer(payload.timeout_ms / 1000.0, lambda: asyncio.run(handle_loss()))
         game_state["game_timer"].start()
-    return {"message": "Balle reçue."}
+
+    await manager.broadcast_state()
+    return {"message": "Ball received."}
 
 @app.post("/api/pass-ball")
-def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
+async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
     with state_lock:
+        my_id = game_state["own_identifier"]
         current_word = game_state.get("current_word")
-        start_time = game_state.get("turn_start_time")
-        incoming_combo = game_state.get("combo_counter", 1)
+        turn_start_time = game_state.get("turn_start_time")
 
         if current_word is None:
-            raise HTTPException(status_code=408, detail="Temps écoulé côté serveur.")
+            raise HTTPException(status_code=408, detail="Server-side timeout or not your turn.")
         if not payload.newWord.startswith(current_word) or len(payload.newWord) != len(current_word) + 1:
-            raise HTTPException(status_code=400, detail="Mot invalide.")
-
-        if game_state.get("game_timer"):
+            raise HTTPException(status_code=400, detail="Invalid word.")
+        
+        if game_state.get("game_timer"): 
             game_state["game_timer"].cancel()
 
-        response_time_ms = int((time.time() - start_time) * 1000) if start_time else 0
+        if turn_start_time is None:
+            # Fallback for turn_start_time if it was somehow not set (shouldn't happen with receive_ball fix)
+            turn_start_time = time.time() - (game_state.get("current_turn_timeout_ms", BASE_TIMEOUT_MS) / 1000.0)
+            logging.warning("turn_start_time was None; using fallback.")
+        response_time_ms = int((payload.client_timestamp_ms / 1000 - turn_start_time) * 1000)
 
-        next_timeout, multipliers, next_combo = calculate_next_timeout(response_time_ms, current_word, payload.newWord, incoming_combo)
+        new_letter = payload.newWord[-1]
+        
+        cursed_malus = new_letter in game_state["cursed_letters"]
+        if cursed_malus:
+            game_state["cursed_letters"].remove(new_letter)
+            game_state["player_phone_pads"][my_id] = get_new_phone_pad()
+            logging.info(f"Player {my_id} played cursed letter '{new_letter}'. Curse lifted for all, pad reset for player.")
 
-        history_entry = HistoryEntry(
-            player=game_state["own_identifier"], word=payload.newWord,
-            response_time_ms=response_time_ms, applied_multipliers=multipliers
-        )
+        pad_number = LETTER_TO_PAD.get(new_letter)
+        if pad_number:
+            my_pad = game_state["player_phone_pads"].setdefault(my_id, get_new_phone_pad())
+            if my_pad[pad_number] < PAD_CHARGE_THRESHOLD:
+                my_pad[pad_number] += 1
+
+        pad_combo_malus = False
+        if game_state.get("attack_combo_player") == my_id:
+            pad_combo_malus = True
+            game_state["attack_combo_player"] = None # Consume the attack combo
+            logging.info(f"Player {my_id} consumes their Attack combo.")
+
+        my_vowel_power = game_state["player_vowel_powers"].get(my_id, {v: 1.0 for v in VOWELS})
+        next_timeout, modifiers, next_vowel_power = calculate_next_timeout(response_time_ms, payload.newWord, my_vowel_power, cursed_malus, pad_combo_malus)
+        game_state["player_vowel_powers"][my_id] = next_vowel_power
+
+        # Apply power-up multiplier
+        if game_state.get("power_up_multiplier") and game_state.get("protected_player") == my_id:
+            next_timeout *= game_state["power_up_multiplier"]
+            modifiers.append(f"power-up x{game_state['power_up_multiplier']}")
+            game_state["power_up_multiplier"] = None
+            game_state["protected_player"] = None
+
+        history_entry = HistoryEntry(player=my_id, word=payload.newWord, response_time_ms=response_time_ms, applied_multipliers=modifiers)
         game_state["history"].append(history_entry)
 
-        other_players = [p_id for p_id in game_state["players"] if p_id != game_state["own_identifier"]]
+        my_letters = [h.word[-1] for h in game_state["history"] if h.player == my_id]
+        if my_letters:
+            letter_counts = Counter(my_letters)
+            most_common = letter_counts.most_common(1)[0]
+            if most_common[1] >= CURSE_THRESHOLD:
+                if most_common[0] not in game_state["cursed_letters"]:
+                    game_state["cursed_letters"].append(most_common[0])
 
+        other_players = [p_id for p_id in game_state.get("players", []) if p_id != my_id]
         next_player_identifier = None
-        if other_players:
+
+        if "computer" in other_players:
+            next_player_identifier = "computer"
+        elif other_players:
             candidates = list(other_players)
             while candidates:
                 min_turns = min(game_state["turn_counts"].get(p, 0) for p in candidates)
@@ -377,43 +643,76 @@ def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks):
                 except requests.RequestException:
                     candidates.remove(potential_next_player)
             if not next_player_identifier:
-                next_player_identifier = game_state["own_identifier"]
+                next_player_identifier = my_id
         else:
-            next_player_identifier = game_state["own_identifier"]
+            next_player_identifier = my_id
 
-        if next_player_identifier != game_state["own_identifier"]:
-            game_state["turn_counts"][next_player_identifier] += 1
-            next_payload = BallPayload(
-                word=payload.newWord, timeout_ms=next_timeout, combo_counter=next_combo,
-                incomingPlayers=game_state["players"], incomingTurnCounts=game_state["turn_counts"],
-                incomingReadyPlayers=game_state["ready_players"], incomingHistory=game_state["history"]
-            )
-            reset_local_game_state()
+        game_state["turn_counts"].setdefault(next_player_identifier, 0)
+        game_state["turn_counts"][next_player_identifier] += 1
+
+        next_payload = BallPayload(
+            word=payload.newWord, timeout_ms=int(next_timeout), 
+            player_vowel_powers=game_state["player_vowel_powers"],
+            cursed_letters=game_state["cursed_letters"],
+            player_phone_pads=game_state["player_phone_pads"],
+            incomingPlayers=game_state["players"], 
+            incomingTurnCounts=game_state["turn_counts"],
+            incomingReadyPlayers=game_state["ready_players"], 
+            incomingHistory=game_state["history"]
+        )
+        
+        if next_player_identifier == "computer":
+            background_tasks.add_task(play_computer_turn_and_return, next_payload)
+        elif next_player_identifier != my_id:
             background_tasks.add_task(send_ball_in_background, next_player_identifier, next_payload.dict())
         else:
-            simulated_word = payload.newWord + random.choice('abcdefghijklmnopqrstuvwxyz')
-            game_state["turn_counts"][game_state["own_identifier"]] += 1
-            ia_next_timeout, _, ia_next_combo = calculate_next_timeout(50, payload.newWord, simulated_word, next_combo)
-            next_payload = BallPayload(
-                word=simulated_word, timeout_ms=ia_next_timeout, combo_counter=ia_next_combo,
-                incomingPlayers=game_state["players"], incomingTurnCounts=game_state["turn_counts"],
-                incomingReadyPlayers=game_state["ready_players"], incomingHistory=game_state["history"]
-            )
-            reset_local_game_state()
-            receive_ball(next_payload)
+            background_tasks.add_task(receive_ball, next_payload)
 
-    return {"message": "Balle passée avec succès."}
+    return {"message": "Ball passed successfully."}
 
+
+# --- Endpoints Simples ---
 @app.post("/api/game-over")
-def game_over(payload: GameOverPayload):
+async def game_over(payload: GameOverPayload):
     with state_lock:
+        if game_state.get("current_word") is None and not game_state.get("history"):
+            return {"message": "Game already over."}
+
         game_state["last_loser"] = payload.loser
         if game_state.get("history"):
             game_state["archive"].append(list(game_state["history"]))
-
-    reset_local_game_state()
+    
+    await reset_full_game_state_and_broadcast()
     return {"message": "OK"}
 
-# --- Point d'Entrée ---
+@app.post("/api/rematch")
+async def rematch(background_tasks: BackgroundTasks):
+    broadcast_sync("/api/rematch-broadcast", {})
+    await initiate_rematch_logic(background_tasks)
+    return {"message": "Rematch proposed."}
+
+@app.post("/api/rematch-broadcast")
+async def rematch_broadcast(background_tasks: BackgroundTasks):
+    await initiate_rematch_logic(background_tasks)
+    return {"message": "OK"}
+
+@app.get("/health")
+def health_check(): return {"status": "ok"}
+
+@app.get("/api/ping")
+def ping_for_discovery():
+    with state_lock:
+        return {"message": "pong", "identity": game_state.get("own_identifier")}
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    await manager.broadcast_state()
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
