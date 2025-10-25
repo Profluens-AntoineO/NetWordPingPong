@@ -371,7 +371,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             if (!response.ok) {
                 const errorData = await response.json();
-                throw new Error(errorData.detail || 'Erreur lors de l'envoi.');
+                throw new Error(errorData.detail || 'Erreur lors de l\'envoi.');
             }
         } catch (error) {
             statusEl.textContent = error.message;
