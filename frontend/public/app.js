@@ -20,6 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const phonePadDisplayEl = document.getElementById('phone-pad-display');
     const activePlayerDisplayEl = document.getElementById('active-player-display');
     const inabilityDisplayEl = document.getElementById('inability-display');
+    const missionsDisplayEl = document.getElementById('missions-display');
 
     let localCurrentWord = null;
     let gameTimer = null;
@@ -303,6 +304,29 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function updateMissionsDisplay(missions, progress) {
+        if (!missionsDisplayEl) return;
+        missionsDisplayEl.innerHTML = '';
+        if (missions.length === 0) {
+            missionsDisplayEl.innerHTML = '<span>Aucune mission.</span>';
+            return;
+        }
+        missions.forEach(mission => {
+            const div = document.createElement('div');
+            const progressValue = progress[mission.id] || 0;
+            const isCompleted = progressValue >= (mission.id === 'suite_harmonique' ? 3 : 4); // Example thresholds
+            div.className = `p-2 rounded-md ${isCompleted ? 'bg-green-800' : 'bg-slate-700'}`;
+            div.innerHTML = `
+                <h3 class="font-bold text-cyan-400">${mission.name} ${isCompleted ? '(Terminée !)' : ''}</h3>
+                <p class="text-xs text-slate-400">${mission.description}</p>
+                <div class="w-full bg-slate-600 rounded-full h-2.5 mt-2">
+                    <div class="bg-cyan-400 h-2.5 rounded-full" style="width: ${Math.min(100, (progressValue / (mission.id === 'suite_harmonique' ? 3 : 4)) * 100)}%"></div>
+                </div>
+            `;
+            missionsDisplayEl.appendChild(div);
+        });
+    }
+
     function updatePhonePadDisplay(playerPhonePads) {
         if (!phonePadDisplayEl || !myIdentifier || !playerPhonePads[myIdentifier]) return;
         const myPad = playerPhonePads[myIdentifier];
@@ -394,6 +418,7 @@ document.addEventListener('DOMContentLoaded', () => {
             updateDeadLettersDisplay(data.dead_letters);
             updatePhonePadDisplay(data.player_phone_pads);
             updateInabilityDisplay(data.player_inabilities ? data.player_inabilities[myIdentifier] : []);
+            updateMissionsDisplay(data.active_missions, data.mission_progress);
 
             if (data.active_player && data.active_player === myIdentifier) {
                 setInTurnState(data);
