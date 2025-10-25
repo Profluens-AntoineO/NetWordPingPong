@@ -8,8 +8,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const timerDisplayEl = document.getElementById('timer-display');
     const wordPrefixDisplayEl = document.getElementById('word-prefix-display');
     const wordDisplayEl = document.getElementById('word-display');
-    const wordInput = document.getElementById('word-input');
-    const sendButton = document.getElementById('send-button');
     const restartButton = document.getElementById('restart-button');
     const readyButton = document.getElementById('ready-button');
     const discoverButton = document.getElementById('discover-button');
@@ -18,7 +16,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const archiveListEl = document.getElementById('archive-list');
     const vowelPowerDisplayEl = document.getElementById('vowel-power-display');
     const cursedLettersDisplayEl = document.getElementById('cursed-letters-display');
+    const deadLettersDisplayEl = document.getElementById('dead-letters-display');
     const phonePadDisplayEl = document.getElementById('phone-pad-display');
+    const activePlayerDisplayEl = document.getElementById('active-player-display');
+    const inabilityDisplayEl = document.getElementById('inability-display');
 
     let localCurrentWord = null;
     let gameTimer = null;
@@ -57,9 +58,7 @@ document.addEventListener('DOMContentLoaded', () => {
         wordDisplayEl.textContent = '';
         wordPrefixDisplayEl.textContent = '';
         timerDisplayEl.textContent = '';
-        wordInput.value = '';
-        wordInput.disabled = true;
-        sendButton.classList.add('hidden');
+        activePlayerDisplayEl.innerHTML = '';
         restartButton.classList.add('hidden');
         readyButton.classList.remove('hidden');
         readyButton.disabled = false;
@@ -76,9 +75,6 @@ document.addEventListener('DOMContentLoaded', () => {
         wordDisplayEl.textContent = '';
         wordPrefixDisplayEl.textContent = '';
         timerDisplayEl.textContent = '';
-        wordInput.value = '';
-        wordInput.disabled = true;
-        sendButton.classList.add('hidden');
         restartButton.classList.add('hidden');
         readyButton.classList.add('hidden');
         discoverButton.classList.add('hidden');
@@ -99,14 +95,9 @@ document.addEventListener('DOMContentLoaded', () => {
             wordPrefixDisplayEl.textContent = '';
             wordDisplayEl.textContent = word;
         }
-        wordInput.disabled = false;
-        wordInput.value = localCurrentWord;
-        wordInput.focus();
         readyButton.classList.add('hidden');
         restartButton.classList.add('hidden');
         discoverButton.classList.add('hidden');
-        sendButton.classList.remove('hidden');
-        sendButton.disabled = false;
         let timeLeft = Math.round(timeout_ms / 1000);
         timerDisplayEl.textContent = `Temps restant : ${timeLeft}s`;
         if (countdownInterval) clearInterval(countdownInterval);
@@ -126,9 +117,8 @@ document.addEventListener('DOMContentLoaded', () => {
         isMyTurn = false;
         if (countdownInterval) clearInterval(countdownInterval);
         timerDisplayEl.textContent = '';
+        activePlayerDisplayEl.innerHTML = '';
         statusEl.textContent = "Partie terminée !";
-        wordInput.disabled = true;
-        sendButton.classList.add('hidden');
         readyButton.classList.add('hidden');
         discoverButton.classList.add('hidden');
         restartButton.classList.remove('hidden');
@@ -142,7 +132,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateHistoryList(history) {
-        historyListEl.innerHTML = '';
+        const historyList = document.getElementById('panel-history').querySelector('ul');
+        historyList.innerHTML = '';
         if (history && history.length > 0) {
             history.forEach(entry => {
                 const li = document.createElement('li');
@@ -161,17 +152,18 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                     li.appendChild(tagsContainer);
                 }
-                historyListEl.appendChild(li);
+                historyList.appendChild(li);
             });
-            historyListEl.scrollTop = historyListEl.scrollHeight;
+            historyList.scrollTop = historyList.scrollHeight;
         } else {
-            historyListEl.innerHTML = '<li>En attente du premier coup...</li>';
+            historyList.innerHTML = '<li>En attente du premier coup...</li>';
         }
     }
 
     function updateArchiveList(archive) {
-        if (!archiveListEl) return;
-        archiveListEl.innerHTML = '';
+        const archiveList = document.getElementById('panel-archives').querySelector('div');
+        if (!archiveList) return;
+        archiveList.innerHTML = '';
         if (archive && archive.length > 0) {
             archive.slice().reverse().forEach((gameHistory, index) => {
                 const gameContainer = document.createElement('div');
@@ -187,31 +179,65 @@ document.addEventListener('DOMContentLoaded', () => {
                     gameUl.appendChild(li);
                 });
                 gameContainer.appendChild(gameUl);
-                archiveListEl.appendChild(gameContainer);
+                archiveList.appendChild(gameContainer);
             });
         } else {
-            archiveListEl.innerHTML = '<span>Aucune partie archivée.</span>';
+            archiveList.innerHTML = '<span>Aucune partie archivée.</span>';
         }
     }
 
     function updatePlayerList(data) {
         playerListEl.innerHTML = '';
+        playerListEl.className = 'flex flex-wrap gap-4 justify-center'; // Use flex-wrap for card layout
+
         if (data.players && data.players.length > 0) {
             myIdentifier = data.self;
-            data.players.sort().forEach(playerIdentifier => {
-                const li = document.createElement('li');
+            let sortedPlayers = [...data.players].sort();
+            if (data.active_player) {
+                sortedPlayers = sortedPlayers.filter(p => p !== data.active_player);
+                sortedPlayers.unshift(data.active_player);
+            }
+
+            sortedPlayers.forEach(playerIdentifier => {
                 const isReady = data.ready_players.includes(playerIdentifier);
-                let playerText = `${playerIdentifier}`;
-                if (playerIdentifier === myIdentifier) {
-                    playerText = `(Vous) ${playerText}`;
-                    li.classList.add('text-cyan-400', 'font-bold');
+                const isActive = playerIdentifier === data.active_player;
+                const isSelf = playerIdentifier === myIdentifier;
+
+                let cardClasses = 'p-3 rounded-lg flex flex-col justify-between items-center transition-all duration-300 w-36 h-24 border-2 ';
+                if (isActive) {
+                    cardClasses += 'bg-amber-500/20 border-amber-400';
+                } else if (isReady) {
+                    cardClasses += 'bg-green-500/10 border-green-500';
+                } else {
+                    cardClasses += 'bg-slate-700/50 border-slate-600';
                 }
-                li.textContent = playerText;
+
+                const playerCard = document.createElement('div');
+                playerCard.className = cardClasses;
+
+                let playerText = playerIdentifier;
+                if (isSelf) {
+                    playerText = `(Vous) ${playerText.split(':')[0]}`;
+                }
+
+                const maxTimeout = data.player_max_timeouts ? data.player_max_timeouts[playerIdentifier] / 1000 : 'N/A';
+                
+                const nameSpan = document.createElement('span');
+                nameSpan.className = `font-semibold text-sm truncate ${isSelf ? 'text-cyan-400' : ''}`;
+                nameSpan.textContent = playerText;
+
+                const timeoutSpan = document.createElement('span');
+                timeoutSpan.className = 'text-xs text-slate-400';
+                timeoutSpan.textContent = `Max: ${maxTimeout}s`;
+
                 const statusSpan = document.createElement('span');
-                statusSpan.textContent = isReady ? ' (Prêt !)' : ' (En attente)';
-                statusSpan.className = isReady ? 'text-green-400' : 'text-amber-400';
-                li.appendChild(statusSpan);
-                playerListEl.appendChild(li);
+                statusSpan.className = `text-xs font-bold px-2 py-0.5 rounded-full ${isReady ? 'bg-green-500/50 text-green-300' : 'bg-slate-600 text-slate-300'}`;
+                statusSpan.textContent = isReady ? 'Prêt' : 'Attente';
+
+                playerCard.appendChild(nameSpan);
+                playerCard.appendChild(timeoutSpan);
+                playerCard.appendChild(statusSpan);
+                playerListEl.appendChild(playerCard);
             });
         } else {
             playerListEl.innerHTML = '<li>Aucun joueur détecté.</li>';
@@ -226,7 +252,7 @@ document.addEventListener('DOMContentLoaded', () => {
         vowels.forEach(vowel => {
             const power = myVowelPower[vowel] || 0;
             const div = document.createElement('div');
-            div.className = 'p-2 rounded-md bg-slate-700';
+            div.className = 'p-2 rounded-md bg-slate-800/50';
             div.innerHTML = `<div class="text-2xl font-bold text-cyan-400">${vowel.toUpperCase()}</div><div class="text-sm text-slate-400">${(power * 100).toFixed(0)}%</div>`;
             vowelPowerDisplayEl.appendChild(div);
         });
@@ -247,6 +273,36 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function updateDeadLettersDisplay(deadLetters) {
+        if (!deadLettersDisplayEl) return;
+        deadLettersDisplayEl.innerHTML = '';
+        if (deadLetters.length === 0) {
+            deadLettersDisplayEl.innerHTML = '<span>Aucune lettre morte.</span>';
+            return;
+        }
+        deadLetters.forEach(letter => {
+            const div = document.createElement('div');
+            div.className = `p-2 rounded-md flex items-center gap-2 bg-black`;
+            div.innerHTML = `<span class="text-2xl font-bold text-red-600">${letter.toUpperCase()}</span>`;
+            deadLettersDisplayEl.appendChild(div);
+        });
+    }
+
+    function updateInabilityDisplay(inabilities) {
+        if (!inabilityDisplayEl) return;
+        inabilityDisplayEl.innerHTML = '';
+        if (!inabilities || inabilities.length === 0) {
+            inabilityDisplayEl.innerHTML = '<span>Aucune inhabilité.</span>';
+            return;
+        }
+        inabilities.forEach(letter => {
+            const div = document.createElement('div');
+            div.className = `p-2 rounded-md flex items-center gap-2 bg-yellow-900`;
+            div.innerHTML = `<span class="text-2xl font-bold">${letter.toUpperCase()}</span>`;
+            inabilityDisplayEl.appendChild(div);
+        });
+    }
+
     function updatePhonePadDisplay(playerPhonePads) {
         if (!phonePadDisplayEl || !myIdentifier || !playerPhonePads[myIdentifier]) return;
         const myPad = playerPhonePads[myIdentifier];
@@ -264,18 +320,25 @@ document.addEventListener('DOMContentLoaded', () => {
             '6': "MNO", '7': "PQRS", '8': "TUV", '9': "WXYZ"
         };
 
+        const chargeColors = [
+            'bg-slate-700/50', 
+            'bg-teal-800', 
+            'bg-teal-700', 
+            'bg-green-600'
+        ];
+
         padGrid.flat().forEach(key => {
             const div = document.createElement('div');
             const isSpecial = ['*', '0', '#'].includes(key);
             const isNumeric = !isNaN(parseInt(key)) && !isSpecial;
 
-            let bgColor = 'bg-slate-700';
+            let bgColor = 'bg-slate-700/50';
             let content = '';
 
             if (key === '1') {
                 const isReady = isPowerUpReady(myPad);
-                bgColor = isReady ? 'bg-red-500' : 'bg-slate-900';
-                content = `<div class="text-3xl font-bold text-slate-900">1</div>`;
+                bgColor = isReady ? 'bg-red-500' : 'bg-slate-900/50';
+                content = `<div class="text-2xl font-bold text-slate-900">1</div>`;
                 div.addEventListener('click', () => {
                     if (isReady) {
                         fetch(`${backendBaseUrl}/api/power-up`, { method: 'POST' });
@@ -289,7 +352,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (key === '*') comboName = 'Purge';
                 if (key === '0') comboName = 'Recharge';
                 if (key === '#') comboName = 'Attaque';
-                content = `<div class="text-3xl font-bold">${key}</div><div class="text-xs">${comboName}</div>`;
+                content = `<div class="text-2xl font-bold">${key}</div><div class="text-xs">${comboName}</div>`;
                  div.addEventListener('click', () => {
                     if (isColumnCharged(key, myPad)) {
                         fetch(`${backendBaseUrl}/api/combo`, {
@@ -301,12 +364,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             } else if (isNumeric) {
                 const charge = myPad[key] || 0;
-                const isCharged = charge >= 1;
-                if (isCharged) bgColor = 'bg-green-600';
-                content = `<div class="text-3xl font-bold">${key}</div><div class="text-xs">${keyToLetters[key]}</div><div class="text-xs">${charge}/3</div>`;
+                bgColor = chargeColors[charge] || 'bg-slate-700/50';
+                content = `<div class="text-2xl font-bold">${key}</div><div class="text-xs">${keyToLetters[key]}</div>`;
             }
             
-            div.className = `p-3 rounded-md ${bgColor}`;
+            div.className = `p-2 rounded-md ${bgColor}`;
             div.innerHTML = content;
             phonePadDisplayEl.appendChild(div);
         });
@@ -329,13 +391,15 @@ document.addEventListener('DOMContentLoaded', () => {
             updateArchiveList(data.archive);
             updateVowelPowerDisplay(data.player_vowel_powers);
             updateCursedLettersDisplay(data.cursed_letters);
+            updateDeadLettersDisplay(data.dead_letters);
             updatePhonePadDisplay(data.player_phone_pads);
-            if (data.word && data.word !== localCurrentWord) {
-                if (data.word === "game_starting") {
-                    statusEl.textContent = "La partie commence !";
-                } else {
-                    setInTurnState(data);
-                }
+            updateInabilityDisplay(data.player_inabilities ? data.player_inabilities[myIdentifier] : []);
+
+            if (data.active_player && data.active_player === myIdentifier) {
+                setInTurnState(data);
+            } else if (data.active_player) {
+                setWaitingState();
+                statusEl.textContent = `Au tour de ${data.active_player}...`;
             } else if (!data.word && localCurrentWord) {
                 setGameOverState();
             }
@@ -409,7 +473,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 discoverButton.disabled = false;
             });
     });
-    sendButton.addEventListener('click', () => passBall(wordInput.value.slice(-1)));
     document.addEventListener('keydown', (event) => {
         const key = event.key.toLowerCase();
         const myPad = gameState.player_phone_pads ? gameState.player_phone_pads[myIdentifier] : {};
@@ -447,6 +510,28 @@ document.addEventListener('DOMContentLoaded', () => {
                 restartButton.disabled = false;
                 statusEl.textContent = "Erreur lors de la proposition.";
             });
+    });
+
+    // Tab switching logic
+    const tabs = ['game', 'history', 'archives'];
+    tabs.forEach(tabId => {
+        const tabButton = document.getElementById(`tab-${tabId}`);
+        if (tabButton) {
+            tabButton.addEventListener('click', () => {
+                // Hide all panels
+                tabs.forEach(id => {
+                    const panel = document.getElementById(`panel-${id}`);
+                    const tab = document.getElementById(`tab-${id}`);
+                    if (panel) panel.classList.add('hidden');
+                    if (tab) tab.classList.remove('active-tab');
+                });
+                // Show the selected panel
+                const selectedPanel = document.getElementById(`panel-${tabId}`);
+                const selectedTab = document.getElementById(`tab-${tabId}`);
+                if (selectedPanel) selectedPanel.classList.remove('hidden');
+                if (selectedTab) selectedTab.classList.add('active-tab');
+            });
+        }
     });
 
     connect();
