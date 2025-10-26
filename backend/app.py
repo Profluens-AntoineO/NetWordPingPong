@@ -94,7 +94,6 @@ class ConnectionManager:
                 "active_player": game_state.get("active_player"),
                 "active_missions": [m.to_dict() for m in game_state.get("active_missions", [])],
                 "completed_missions": [m.to_dict() for m in game_state.get("completed_missions", [])],
-                "mission_progress": game_state.get("mission_progress", {})
             }
         message = json.dumps(full_state)
         for connection in list(self.active_connections):
@@ -107,16 +106,27 @@ manager = ConnectionManager()
 
 # --- Mission System ---
 class Mission:
-    def __init__(self, id: str, name: str, description: str, trigger_func: callable, effect_func: callable, progress_func: callable):
+    def __init__(self, id: str, name: str, description: str, goal: int, trigger_func: callable, effect_func: callable, progress_func: callable):
         self.id = id
         self.name = name
         self.description = description
+        self.goal = goal
         self.trigger_func = trigger_func
         self.effect_func = effect_func
         self.progress_func = progress_func
+        self.current_step = 0
 
     def to_dict(self):
-        return {"id": self.id, "name": self.name, "description": self.description}
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "goal": self.goal,
+            "current_step": self.current_step
+        }
+
+    def copy(self):
+        return Mission(self.id, self.name, self.description, self.goal, self.trigger_func, self.effect_func, self.progress_func)
 
 # --- Pydantic Models ---
 class HistoryEntry(BaseModel):
@@ -138,10 +148,9 @@ class RegisterPayload(BaseModel):
     initialPlayerLetterCounts: Optional[Dict[str, Dict[str, int]]] = Field(default_factory=dict)
     initialPlayerMaxTimeouts: Optional[Dict[str, int]] = Field(default_factory=dict)
     initialPlayerInabilities: Optional[Dict[str, List[str]]] = Field(default_factory=dict)
-    initialActiveMissions: Optional[List[Dict[str, str]]] = Field(default_factory=list)
-    initialCompletedMissions: Optional[List[Dict[str, str]]] = Field(default_factory=list)
+    initialActiveMissions: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    initialCompletedMissions: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     initialLetterCurseCounts: Optional[Dict[str, int]] = Field(default_factory=dict)
-    initialMissionProgress: Optional[Dict[str, float]] = Field(default_factory=dict)
 
 class ReadyPayload(BaseModel):
     player_id: str
@@ -159,10 +168,9 @@ class BallPayload(BaseModel):
     player_letter_counts: Dict[str, Dict[str, int]]
     player_max_timeouts: Dict[str, int]
     player_inabilities: Dict[str, List[str]]
-    active_missions: List[Dict[str, str]]
-    completed_missions: List[Dict[str, str]]
+    active_missions: List[Dict[str, Any]]
+    completed_missions: List[Dict[str, Any]]
     letter_curse_counts: Dict[str, int]
-    mission_progress: Dict[str, float]
     incomingPlayers: List[str]
     incomingTurnCounts: Dict[str, int]
     incomingReadyPlayers: List[str]
@@ -181,54 +189,62 @@ game_state: Dict = {}
 state_lock = threading.RLock()
 
 # --- Mission Definitions ---
-# Mission 1: Suite Harmonique
-def trigger_suite_harmonique(trigger_data: Dict[str, Any]) -> bool:
-    return trigger_data["mission_progress"].get("suite_harmonique", 0) >= 3
+def trigger_suite_harmonique(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    return mission.current_step >= mission.goal
 
 async def effect_suite_harmonique(current_player_id: str, background_tasks: BackgroundTasks):
     logging.info(f"Mission triggered: Suite Harmonique by {current_player_id}")
-    game_state["opponent_speed_multiplier"][current_player_id] = 1.3 # 30% faster for opponent
+    game_state["opponent_speed_multiplier"][current_player_id] = 1.3
 
-def progress_suite_harmonique(player_id: str, new_letter: str):
+def progress_suite_harmonique(mission: "Mission", player_id: str, new_letter: str):
     if new_letter in VOWELS:
-        game_state["mission_progress"]["suite_harmonique"] = game_state["mission_progress"].get("suite_harmonique", 0) + 1
+        mission.current_step += 1
     else:
-        game_state["mission_progress"]["suite_harmonique"] = 0
+        mission.current_step = 0
 
-# Mission 2: Mur de Consonnes
-def trigger_mur_de_consonnes(trigger_data: Dict[str, Any]) -> bool:
-    return trigger_data["mission_progress"].get("mur_de_consonnes", 0) >= 4
+def trigger_mur_de_consonnes(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    return mission.current_step >= mission.goal
 
 async def effect_mur_de_consonnes(current_player_id: str, background_tasks: BackgroundTasks):
     logging.info(f"Mission triggered: Mur de Consonnes by {current_player_id}")
     game_state["player_max_timeouts"][current_player_id] = int(game_state["player_max_timeouts"].get(current_player_id, BASE_TIMEOUT_MS) * 1.5)
 
-def progress_mur_de_consonnes(player_id: str, new_letter: str):
+def progress_mur_de_consonnes(mission: "Mission", player_id: str, new_letter: str):
     if new_letter not in VOWELS:
-        game_state["mission_progress"]["mur_de_consonnes"] = game_state["mission_progress"].get("mur_de_consonnes", 0) + 1
+        mission.current_step += 1
     else:
-        game_state["mission_progress"]["mur_de_consonnes"] = 0
+        mission.current_step = 0
 
 ALL_MISSIONS = [
-    Mission("suite_harmonique", "Suite Harmonique", "Jouer 3 voyelles consécutives. Réduit le temps du prochain adversaire de 30%.", trigger_suite_harmonique, effect_suite_harmonique, progress_suite_harmonique),
-    Mission("mur_de_consonnes", "Mur de Consonnes", "Jouer 4 consonnes consécutives. Augmente votre temps pour le prochain tour de 50%.", trigger_mur_de_consonnes, effect_mur_de_consonnes, progress_mur_de_consonnes),
+    Mission("suite_harmonique", "Suite Harmonique", "Jouer 3 voyelles consécutives. Réduit le temps du prochain adversaire de 30%.", goal=3, trigger_func=trigger_suite_harmonique, effect_func=effect_suite_harmonique, progress_func=progress_suite_harmonique),
+    Mission("mur_de_consonnes", "Mur de Consonnes", "Jouer 4 consonnes consécutives. Augmente votre temps pour le prochain tour de 50%.", goal=4, trigger_func=trigger_mur_de_consonnes, effect_func=effect_mur_de_consonnes, progress_func=progress_mur_de_consonnes),
 ]
+
+def find_mission_template_by_id(mission_id: str) -> Optional[Mission]:
+    for mission in ALL_MISSIONS:
+        if mission.id == mission_id:
+            return mission
+    return None
 
 def select_initial_missions():
     with state_lock:
         game_state["mission_pool"] = list(ALL_MISSIONS)
-        game_state["active_missions"] = random.sample(game_state["mission_pool"], min(3, len(ALL_MISSIONS)))
-        for mission in game_state["active_missions"]:
-            game_state["mission_pool"].remove(mission)
+        game_state["active_missions"] = []
+        missions_to_activate = random.sample(game_state["mission_pool"], min(3, len(game_state["mission_pool"])))
+        for mission_template in missions_to_activate:
+            active_mission = mission_template.copy()
+            game_state["active_missions"].append(active_mission)
+            game_state["mission_pool"].remove(mission_template)
 
 def replace_triggered_mission(triggered_mission: Mission):
     with state_lock:
-        game_state["active_missions"].remove(triggered_mission)
+        game_state["active_missions"] = [m for m in game_state["active_missions"] if m.id != triggered_mission.id]
         game_state["completed_missions"].append(triggered_mission)
         if game_state["mission_pool"]:
-            new_mission = random.choice(game_state["mission_pool"])
-            game_state["active_missions"].append(new_mission)
-            game_state["mission_pool"].remove(new_mission)
+            new_mission_template = random.choice(game_state["mission_pool"])
+            new_active_mission = new_mission_template.copy()
+            game_state["active_missions"].append(new_active_mission)
+            game_state["mission_pool"].remove(new_mission_template)
 
 # --- State Reset Functions ---
 def get_new_phone_pad():
@@ -262,7 +278,6 @@ async def reset_full_game_state_and_broadcast():
         game_state["player_inabilities"] = {p_id: [] for p_id in game_state.get("players", [])}
         game_state["active_missions"] = []
         game_state["completed_missions"] = []
-        game_state["mission_progress"] = {}
         game_state["forced_letter"] = None
         game_state["scramble_ui_for_player"] = None
         game_state["opponent_speed_multiplier"] = {}
@@ -301,7 +316,6 @@ def register_back(player_id_to_register_with: str):
             "initialActiveMissions": [m.to_dict() for m in game_state.get("active_missions", [])],
             "initialCompletedMissions": [m.to_dict() for m in game_state.get("completed_missions", [])],
             "initialLetterCurseCounts": game_state["letter_curse_counts"],
-            "initialMissionProgress": game_state["mission_progress"]
         }
     try:
         requests.post(f"http://{player_id_to_register_with}/api/register", json=payload, timeout=1)
@@ -343,49 +357,6 @@ def discover_peers():
     
     asyncio.run(manager.broadcast_state())
 
-# --- Core Logic ---
-
-@app.on_event("startup")
-def on_startup():
-    with state_lock:
-        my_id = f"{OWN_HOST}:{PORT}"
-        game_state["own_identifier"] = my_id
-        game_state["players"] = [my_id]
-        game_state["turn_counts"] = {my_id: 0}
-        game_state["ready_players"] = []
-        game_state["archive"] = []
-        game_state["player_vowel_powers"] = {my_id: {v: 1.0 for v in VOWELS}}
-        game_state["cursed_letters"] = []
-        game_state["dead_letters"] = []
-        game_state["player_phone_pads"] = {my_id: get_new_phone_pad()}
-        game_state["player_letter_counts"] = {my_id: {}}
-        game_state["player_max_timeouts"] = {my_id: BASE_TIMEOUT_MS}
-        game_state["player_inabilities"] = {my_id: []}
-        game_state["last_loser"] = None
-        game_state["attack_combo_player"] = None
-        game_state["active_player"] = None
-        game_state["active_missions"] = []
-        game_state["completed_missions"] = []
-        game_state["mission_pool"] = [] # Will be populated later
-        game_state["mission_progress"] = {}
-        game_state["forced_letter"] = None
-        game_state["scramble_ui_for_player"] = None
-        game_state["opponent_speed_multiplier"] = {}
-        game_state["base_timeout_modifier"] = 1.0
-        game_state["letter_curse_counts"] = {}
-    logging.info(f"Server started. Identity: {my_id}")
-
-async def handle_loss():
-    with state_lock:
-        loser_id = game_state.get("own_identifier")
-        current_word = game_state.get("current_word")
-        if not (loser_id and current_word and current_word != "game_starting"):
-            return
-
-        logging.info(f"Player {loser_id} lost due to timeout on word {current_word}")
-        broadcast_sync("/api/game-over", {"loser": loser_id, "reason": "timeout"})
-        await game_over(GameOverPayload(loser=loser_id, reason="timeout"))
-
 def calculate_next_timeout(response_time_ms: int, new_word: str, player_vowel_power: Dict[str, float], cursed_malus: bool = False, pad_combo_malus: bool = False) -> (int, List[str], Dict[str, float]):
     speed_bonus = (5000 - response_time_ms) * 1.5
     new_letter = new_word[-1]
@@ -413,6 +384,48 @@ def calculate_next_timeout(response_time_ms: int, new_word: str, player_vowel_po
 
     final_timeout = max(MIN_TIMEOUT_MS, min(final_timeout, MAX_TIMEOUT_MS))
     return int(final_timeout), applied_multipliers, new_player_vowel_power
+
+# --- Core Logic ---
+
+@app.on_event("startup")
+def on_startup():
+    with state_lock:
+        my_id = f"{OWN_HOST}:{PORT}"
+        game_state["own_identifier"] = my_id
+        game_state["players"] = [my_id]
+        game_state["turn_counts"] = {my_id: 0}
+        game_state["ready_players"] = []
+        game_state["archive"] = []
+        game_state["player_vowel_powers"] = {my_id: {v: 1.0 for v in VOWELS}}
+        game_state["cursed_letters"] = []
+        game_state["dead_letters"] = []
+        game_state["player_phone_pads"] = {my_id: get_new_phone_pad()}
+        game_state["player_letter_counts"] = {my_id: {}}
+        game_state["player_max_timeouts"] = {my_id: BASE_TIMEOUT_MS}
+        game_state["player_inabilities"] = {my_id: []}
+        game_state["last_loser"] = None
+        game_state["attack_combo_player"] = None
+        game_state["active_player"] = None
+        game_state["active_missions"] = []
+        game_state["completed_missions"] = []
+        game_state["mission_pool"] = []
+        game_state["forced_letter"] = None
+        game_state["scramble_ui_for_player"] = None
+        game_state["opponent_speed_multiplier"] = {}
+        game_state["base_timeout_modifier"] = 1.0
+        game_state["letter_curse_counts"] = {}
+    logging.info(f"Server started. Identity: {my_id}")
+
+async def handle_loss():
+    with state_lock:
+        loser_id = game_state.get("own_identifier")
+        current_word = game_state.get("current_word")
+        if not (loser_id and current_word and current_word != "game_starting"):
+            return
+
+        logging.info(f"Player {loser_id} lost due to timeout on word {current_word}")
+        broadcast_sync("/api/game-over", {"loser": loser_id, "reason": "timeout"})
+        await game_over(GameOverPayload(loser=loser_id, reason="timeout"))
 
 def start_game_logic(background_tasks: BackgroundTasks):
     with state_lock:
@@ -448,7 +461,6 @@ def start_game_logic(background_tasks: BackgroundTasks):
             active_missions=[m.to_dict() for m in game_state["active_missions"]],
             completed_missions=[m.to_dict() for m in game_state["completed_missions"]],
             letter_curse_counts=game_state["letter_curse_counts"],
-            mission_progress=game_state["mission_progress"],
             incomingPlayers=game_state["players"], 
             incomingTurnCounts=game_state["turn_counts"],
             incomingReadyPlayers=game_state["ready_players"], 
@@ -469,7 +481,6 @@ async def play_computer_turn_and_return(ball_from_human: BallPayload):
         human_player_id = game_state["own_identifier"]
         base_word = ball_from_human.word
 
-        # Computer chooses a random letter to add, just like a human would
         new_letter = random.choice('abcdefghijklmnopqrstuvwxyz')
         computer_new_word = base_word + new_letter
 
@@ -495,7 +506,6 @@ async def play_computer_turn_and_return(ball_from_human: BallPayload):
         game_state["turn_counts"][computer_id] += 1
         game_state["active_player"] = human_player_id
 
-        # Prepare ball for human
         ball_for_human = BallPayload(
             word=computer_new_word,
             timeout_ms=next_timeout_for_human,
@@ -509,24 +519,20 @@ async def play_computer_turn_and_return(ball_from_human: BallPayload):
             active_missions=[m.to_dict() for m in game_state["active_missions"]],
             completed_missions=[m.to_dict() for m in game_state["completed_missions"]],
             letter_curse_counts=game_state["letter_curse_counts"],
-            mission_progress=game_state["mission_progress"],
             incomingPlayers=game_state["players"],
             incomingTurnCounts=game_state["turn_counts"],
             incomingReadyPlayers=game_state["ready_players"],
             incomingHistory=game_state["history"]
         )
 
-        # Pass ball to human
         await receive_ball(ball_for_human)
 
 async def initiate_rematch_logic(background_tasks: BackgroundTasks):
     with state_lock:
-        # Archive the last game's history if it exists
         if game_state.get("history"):
             if game_state["history"]:
                 game_state["archive"].append(list(game_state["history"]))
         
-        # Reset game-specific state, but keep players
         reset_local_game_state()
         game_state["history"] = []
         game_state["last_loser"] = None
@@ -545,7 +551,6 @@ async def initiate_rematch_logic(background_tasks: BackgroundTasks):
         game_state["letter_curse_counts"] = {}
         select_initial_missions()
 
-        # The first player in the sorted list is responsible for starting the game
         initiator = sorted(current_players)[0]
         my_id = game_state["own_identifier"]
         if my_id == initiator:
@@ -582,13 +587,11 @@ async def end_turn(background_tasks: BackgroundTasks, current_player_id: str, ti
         game_state["active_player"] = next_player_identifier
         game_state["player_max_timeouts"][next_player_identifier] = timeout_for_next_player
 
-        # Handle inabilities transfer
         current_player_inabilities = game_state["player_inabilities"].get(current_player_id, [])
         next_player_inabilities = game_state["player_inabilities"].get(next_player_identifier, [])
         
-        # Combine existing inabilities with new ones from combo/mission
         game_state["player_inabilities"][next_player_identifier] = list(set(next_player_inabilities + new_inabilities))
-        game_state["player_inabilities"][current_player_id] = [] # Clear current player's inabilities after their turn
+        game_state["player_inabilities"][current_player_id] = []
 
         if applied_modifiers:
             last_history = game_state["history"][-1]
@@ -607,7 +610,6 @@ async def end_turn(background_tasks: BackgroundTasks, current_player_id: str, ti
             active_missions=[m.to_dict() for m in game_state["active_missions"]],
             completed_missions=[m.to_dict() for m in game_state["completed_missions"]],
             letter_curse_counts=game_state["letter_curse_counts"],
-            mission_progress=game_state["mission_progress"],
             incomingPlayers=game_state["players"], 
             incomingTurnCounts=game_state["turn_counts"],
             incomingReadyPlayers=game_state["ready_players"], 
@@ -627,7 +629,6 @@ async def end_turn(background_tasks: BackgroundTasks, current_player_id: str, ti
 
 @app.post("/api/discover")
 async def discover(background_tasks: BackgroundTasks):
-    '''Endpoint to trigger network discovery of other players.'''
     background_tasks.add_task(discover_peers)
     return {"message": "Discovery process started."}
 
@@ -645,15 +646,12 @@ async def power_up(background_tasks: BackgroundTasks):
 
         logging.info(f"Player {my_id} triggered Power-Up!")
         
-        # Reset all pads for OTHER players
         for player_id in game_state["players"]:
             if player_id != my_id:
                 game_state["player_phone_pads"][player_id] = get_new_phone_pad()
 
-        # Reset own pads as well after use
         game_state["player_phone_pads"][my_id] = get_new_phone_pad()
         
-        # Power-up consumes a turn, so call end_turn
         await end_turn(background_tasks, my_id, BASE_TIMEOUT_MS, new_inabilities=[], applied_modifiers=["power-up"])
 
     return {"message": "Power-up activated and turn passed."}
@@ -686,7 +684,6 @@ async def trigger_combo(payload: ComboPayload, background_tasks: BackgroundTasks
             for v in VOWELS:
                 game_state["player_vowel_powers"][my_id][v] = MAX_VOWEL_POWER
         elif combo_key == '#': # Attack
-            # Inability for next player based on the letters in the column
             for num in column_nums:
                 for letter, pad_num in LETTER_TO_PAD.items():
                     if pad_num == num and letter not in new_inabilities_for_next_player:
@@ -694,9 +691,8 @@ async def trigger_combo(payload: ComboPayload, background_tasks: BackgroundTasks
         
         for num in column_nums:
             if num in my_pad:
-                my_pad[num] = 0 # Reset pads after combo use
+                my_pad[num] = 0
         
-        # Combo consumes a turn, so call end_turn
         await end_turn(background_tasks, my_id, BASE_TIMEOUT_MS, new_inabilities=new_inabilities_for_next_player, applied_modifiers=[f"combo {combo_key}"])
 
     return {"message": f"Combo {combo_key} activated and turn passed."}
@@ -728,28 +724,29 @@ async def register(payload: RegisterPayload, background_tasks: BackgroundTasks):
         game_state["player_letter_counts"].update(payload.initialPlayerLetterCounts)
         game_state["player_max_timeouts"].update(payload.initialPlayerMaxTimeouts)
         game_state["player_inabilities"].update(payload.initialPlayerInabilities)
-        game_state["active_missions"] = [Mission(id=m["id"], name=m["name"], description=m["description"], trigger_func=lambda x: False, effect_func=lambda x, y: None) for m in payload.initialActiveMissions] # Reconstruct missions
-        game_state["completed_missions"] = [Mission(id=m["id"], name=m["name"], description=m["description"], trigger_func=lambda x: False, effect_func=lambda x, y: None) for m in payload.initialCompletedMissions] # Reconstruct missions
+        
+        if payload.initialActiveMissions:
+            reconstructed_active_missions = []
+            for m_dict in payload.initialActiveMissions:
+                template = find_mission_template_by_id(m_dict["id"])
+                if template:
+                    mission_instance = template.copy()
+                    mission_instance.current_step = m_dict.get("current_step", 0)
+                    reconstructed_active_missions.append(mission_instance)
+            game_state["active_missions"] = reconstructed_active_missions
+
+        if payload.initialCompletedMissions:
+            reconstructed_completed_missions = []
+            for m_dict in payload.initialCompletedMissions:
+                template = find_mission_template_by_id(m_dict["id"])
+                if template:
+                    reconstructed_completed_missions.append(template.copy())
+            game_state["completed_missions"] = reconstructed_completed_missions
+            
         game_state["letter_curse_counts"].update(payload.initialLetterCurseCounts)
-        game_state["mission_progress"].update(payload.initialMissionProgress)
 
     await manager.broadcast_state()
-    return {
-        "message": "Registered",
-        "allPlayers": game_state["players"], 
-        "allTurnCounts": game_state["turn_counts"],
-        "allReadyPlayers": game_state["ready_players"], 
-        "allArchive": [ [e.dict() for e in game] for game in game_state["archive"]],
-        "allPlayerVowelPowers": game_state["player_vowel_powers"],
-        "allCursedLetters": game_state["cursed_letters"],
-        "allDeadLetters": game_state["dead_letters"],
-        "allPlayerPhonePads": game_state["player_phone_pads"],
-        "allPlayerLetterCounts": game_state["player_letter_counts"],
-        "allPlayerMaxTimeouts": game_state["player_max_timeouts"],
-        "allPlayerInabilities": game_state["player_inabilities"],
-        "allActiveMissions": [m.to_dict() for m in game_state["active_missions"]],
-        "allCompletedMissions": [m.to_dict() for m in game_state["completed_missions"]]
-    }
+    return {"message": "Registered"}
 
 @app.post("/api/ready")
 async def im_ready(background_tasks: BackgroundTasks):
@@ -758,7 +755,6 @@ async def im_ready(background_tasks: BackgroundTasks):
         if my_id not in game_state["ready_players"]:
             game_state["ready_players"].append(my_id)
 
-        # If I am the only connected player and I am ready, assume it's a solo game.
         if len(game_state["players"]) == 1 and game_state["players"][0] == my_id:
             computer_id = "computer"
             if computer_id not in game_state["players"]:
@@ -808,6 +804,20 @@ async def receive_ball(payload: BallPayload):
     with state_lock:
         reset_local_game_state()
 
+        reconstructed_active_missions = []
+        for m_dict in payload.active_missions:
+            template = find_mission_template_by_id(m_dict["id"])
+            if template:
+                mission_instance = template.copy()
+                mission_instance.current_step = m_dict.get("current_step", 0)
+                reconstructed_active_missions.append(mission_instance)
+        
+        reconstructed_completed_missions = []
+        for m_dict in payload.completed_missions:
+            template = find_mission_template_by_id(m_dict["id"])
+            if template:
+                reconstructed_completed_missions.append(template.copy())
+
         game_state.update({
             "current_word": payload.word,
             "players": list(set(game_state.get("players", [])).union(set(payload.incomingPlayers))),
@@ -819,10 +829,9 @@ async def receive_ball(payload: BallPayload):
             "player_letter_counts": payload.player_letter_counts,
             "player_max_timeouts": payload.player_max_timeouts,
             "player_inabilities": payload.player_inabilities,
-            "active_missions": [Mission(id=m["id"], name=m["name"], description=m["description"], trigger_func=lambda x: False, effect_func=lambda x, y: None, progress_func=lambda x,y:None) for m in payload.active_missions], # Reconstruct missions
-            "completed_missions": [Mission(id=m["id"], name=m["name"], description=m["description"], trigger_func=lambda x: False, effect_func=lambda x, y: None) for m in payload.completed_missions], # Reconstruct missions
+            "active_missions": reconstructed_active_missions,
+            "completed_missions": reconstructed_completed_missions,
             "letter_curse_counts": payload.letter_curse_counts,
-            "mission_progress": payload.mission_progress,
             "history": payload.incomingHistory,
             "turn_start_time": time.time(),
             "current_turn_timeout_ms": payload.timeout_ms,
@@ -886,13 +895,12 @@ async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks)
         pad_combo_malus = False
         if game_state.get("attack_combo_player") == my_id:
             pad_combo_malus = True
-            game_state["attack_combo_player"] = None # Consume the attack combo
+            game_state["attack_combo_player"] = None
             logging.info(f"Player {my_id} consumes their Attack combo.")
 
         my_vowel_power = game_state["player_vowel_powers"].get(my_id, {v: 1.0 for v in VOWELS})
         next_timeout, modifiers, next_vowel_power = calculate_next_timeout(response_time_ms, payload.newWord, my_vowel_power, cursed_malus, pad_combo_malus)
         game_state["player_vowel_powers"][my_id] = next_vowel_power
-
         history_entry = HistoryEntry(player=my_id, word=payload.newWord, response_time_ms=response_time_ms, applied_multipliers=modifiers)
         game_state["history"].append(history_entry)
 
@@ -910,18 +918,15 @@ async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks)
                     game_state["cursed_letters"].remove(new_letter)
                 if new_letter not in game_state["dead_letters"]:
                     game_state["dead_letters"].append(new_letter)
-                game_state["letter_curse_counts"][new_letter] = 2 # Mark as dead
+                game_state["letter_curse_counts"][new_letter] = 2
                 logging.info(f"Letter '{new_letter}' is now in a DEAD STATE.")
             my_counts[new_letter] = 0
 
-        # --- Mission Progress Update ---
         for mission in game_state["active_missions"]:
-            mission.progress_func(my_id, new_letter)
+            mission.progress_func(mission, my_id, new_letter)
 
-        # --- Mission Triggering ---
         triggered_missions = []
-        for mission in game_state["active_missions"]:
-            # Pass relevant data to trigger function
+        for mission in list(game_state["active_missions"]):
             trigger_data = {
                 "player_id": my_id,
                 "new_letter": new_letter,
@@ -930,29 +935,25 @@ async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks)
                 "timeout_ms": game_state.get("current_turn_timeout_ms", BASE_TIMEOUT_MS),
                 "history": game_state["history"],
                 "player_letter_counts": game_state["player_letter_counts"].get(my_id, {}),
-                "mission_progress": game_state["mission_progress"]
             }
-            if mission.trigger_func(trigger_data):
+            if mission.trigger_func(mission, trigger_data):
                 triggered_missions.append(mission)
         
         for mission in triggered_missions:
-            await mission.effect_func(my_id, background_tasks) # Effects might modify next_timeout or inabilities
+            await mission.effect_func(my_id, background_tasks)
             replace_triggered_mission(mission)
             modifiers.append(f"mission:{mission.name}")
 
-        # Apply opponent speed multiplier if active
         if game_state["opponent_speed_multiplier"].get(my_id):
             next_timeout = int(next_timeout / game_state["opponent_speed_multiplier"][my_id])
             del game_state["opponent_speed_multiplier"][my_id]
 
-        # Apply base timeout modifier (for Zone de Tension)
         next_timeout = int(next_timeout * game_state["base_timeout_modifier"])
 
         await end_turn(background_tasks, my_id, next_timeout, applied_modifiers=modifiers)
 
     return {"message": "Ball passed successfully."}
 
-# --- Endpoints Simples ---
 @app.post("/api/game-over")
 async def game_over(payload: GameOverPayload):
     with state_lock:

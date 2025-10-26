@@ -304,23 +304,25 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function updateMissionsDisplay(missions, progress) {
+    function updateMissionsDisplay(missions) {
         if (!missionsDisplayEl) return;
         missionsDisplayEl.innerHTML = '';
-        if (missions.length === 0) {
+        if (!missions || missions.length === 0) {
             missionsDisplayEl.innerHTML = '<span>Aucune mission.</span>';
             return;
         }
         missions.forEach(mission => {
             const div = document.createElement('div');
-            const progressValue = progress[mission.id] || 0;
-            const isCompleted = progressValue >= (mission.id === 'suite_harmonique' ? 3 : 4); // Example thresholds
+            const progressValue = mission.current_step || 0;
+            const goal = mission.goal;
+            const isCompleted = progressValue >= goal;
+            const progressPercentage = goal > 0 ? Math.min(100, (progressValue / goal) * 100) : (isCompleted ? 100 : 0);
             div.className = `p-2 rounded-md ${isCompleted ? 'bg-green-800' : 'bg-slate-700'}`;
             div.innerHTML = `
                 <h3 class="font-bold text-cyan-400">${mission.name} ${isCompleted ? '(Terminée !)' : ''}</h3>
                 <p class="text-xs text-slate-400">${mission.description}</p>
                 <div class="w-full bg-slate-600 rounded-full h-2.5 mt-2">
-                    <div class="bg-cyan-400 h-2.5 rounded-full" style="width: ${Math.min(100, (progressValue / (mission.id === 'suite_harmonique' ? 3 : 4)) * 100)}%"></div>
+                    <div class="bg-cyan-400 h-2.5 rounded-full" style="width: ${progressPercentage}%"></div>
                 </div>
             `;
             missionsDisplayEl.appendChild(div);
@@ -418,7 +420,7 @@ document.addEventListener('DOMContentLoaded', () => {
             updateDeadLettersDisplay(data.dead_letters);
             updatePhonePadDisplay(data.player_phone_pads);
             updateInabilityDisplay(data.player_inabilities ? data.player_inabilities[myIdentifier] : []);
-            updateMissionsDisplay(data.active_missions, data.mission_progress);
+            updateMissionsDisplay(data.active_missions);
 
             if (data.active_player && data.active_player === myIdentifier) {
                 setInTurnState(data);
@@ -448,7 +450,7 @@ document.addEventListener('DOMContentLoaded', () => {
         isMyTurn = false;
         clearTimeout(gameTimer);
         if (countdownInterval) clearInterval(countdownInterval);
-        setWaitingState();
+        // setWaitingState(); // Removed to prevent UI flashing
         try {
             const response = await fetch(`${backendBaseUrl}/api/pass-ball`, {
                 method: 'POST',
