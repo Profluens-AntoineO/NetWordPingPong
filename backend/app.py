@@ -132,11 +132,20 @@ class Mission:
         return Mission(self.id, self.name, self.description, self.goal, self.trigger_func, self.effect_func, self.progress_func)
 
 # --- Pydantic Models ---
+class TimeCalculationLog(BaseModel):
+    base_timeout: int
+    speed_bonus: float
+    vowel_bonus: float
+    cursed_malus: bool
+    pad_combo_malus: bool
+    final_timeout: int
+
 class HistoryEntry(BaseModel):
     player: str
     word: str
     response_time_ms: int
     applied_multipliers: List[str] = []
+    timeout_log: Optional[TimeCalculationLog] = None
 
 class RegisterPayload(BaseModel):
     ip: str
@@ -459,7 +468,7 @@ def discover_peers():
     
     asyncio.run(manager.broadcast_state())
 
-def calculate_next_timeout(response_time_ms: int, new_word: str, player_vowel_power: Dict[str, float], cursed_malus: bool = False, pad_combo_malus: bool = False) -> (int, List[str], Dict[str, float]):
+def calculate_next_timeout(response_time_ms: int, new_word: str, player_vowel_power: Dict[str, float], cursed_malus: bool = False, pad_combo_malus: bool = False) -> (int, List[str], Dict[str, float], TimeCalculationLog):
     speed_bonus = (5000 - response_time_ms) * 1.5
     new_letter = new_word[-1]
     vowel_bonus = 0
@@ -485,7 +494,17 @@ def calculate_next_timeout(response_time_ms: int, new_word: str, player_vowel_po
     if speed_bonus > 0: applied_multipliers.append("vitesse")
 
     final_timeout = max(MIN_TIMEOUT_MS, min(final_timeout, MAX_TIMEOUT_MS))
-    return int(final_timeout), applied_multipliers, new_player_vowel_power
+    
+    log = TimeCalculationLog(
+        base_timeout=BASE_TIMEOUT_MS,
+        speed_bonus=speed_bonus,
+        vowel_bonus=vowel_bonus,
+        cursed_malus=cursed_malus,
+        pad_combo_malus=pad_combo_malus,
+        final_timeout=int(final_timeout)
+    )
+
+    return int(final_timeout), applied_multipliers, new_player_vowel_power, log
 
 # --- Core Logic ---
 
@@ -591,7 +610,7 @@ async def play_computer_turn_and_return(ball_from_human: BallPayload):
         response_time_ms = random.randint(300, 900)
         computer_vowel_power = game_state["player_vowel_powers"].get(computer_id, {v: 1.0 for v in VOWELS})
         
-        next_timeout_for_human, computer_modifiers, next_computer_vowel_power = calculate_next_timeout(
+        next_timeout_for_human, computer_modifiers, next_computer_vowel_power, timeout_log = calculate_next_timeout(
             response_time_ms, computer_new_word, computer_vowel_power
         )
         game_state["player_vowel_powers"][computer_id] = next_computer_vowel_power
@@ -601,7 +620,8 @@ async def play_computer_turn_and_return(ball_from_human: BallPayload):
             player=computer_id,
             word=computer_new_word,
             response_time_ms=response_time_ms,
-            applied_multipliers=computer_modifiers
+            applied_multipliers=computer_modifiers,
+            timeout_log=timeout_log
         )
         game_state["history"].append(history_entry)
         game_state["turn_counts"].setdefault(computer_id, 0)
@@ -1020,9 +1040,9 @@ async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks)
             logging.info(f"Player {my_id} consumes their Attack combo.")
 
         my_vowel_power = game_state["player_vowel_powers"].get(my_id, {v: 1.0 for v in VOWELS})
-        next_timeout, modifiers, next_vowel_power = calculate_next_timeout(response_time_ms, payload.newWord, my_vowel_power, cursed_malus, pad_combo_malus)
+        next_timeout, modifiers, next_vowel_power, timeout_log = calculate_next_timeout(response_time_ms, payload.newWord, my_vowel_power, cursed_malus, pad_combo_malus)
         game_state["player_vowel_powers"][my_id] = next_vowel_power
-        history_entry = HistoryEntry(player=my_id, word=payload.newWord, response_time_ms=response_time_ms, applied_multipliers=modifiers)
+        history_entry = HistoryEntry(player=my_id, word=payload.newWord, response_time_ms=response_time_ms, applied_multipliers=modifiers, timeout_log=timeout_log)
         game_state["history"].append(history_entry)
 
         my_counts = game_state["player_letter_counts"].setdefault(my_id, {})

@@ -142,6 +142,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 const textContainer = document.createElement('div');
                 textContainer.innerHTML = `<span class="font-mono">${entry.word}</span> <span class="text-slate-500">par</span> <span class="font-semibold">${entry.player}</span> <span class="text-slate-500">en</span> <span class="text-cyan-400">${entry.response_time_ms} ms</span>`;
                 li.appendChild(textContainer);
+
+                if (entry.timeout_log) {
+                    const log = entry.timeout_log;
+                    const logDetails = `(Base: ${log.base_timeout}, Speed: ${log.speed_bonus.toFixed(0)}, Vowel: ${log.vowel_bonus.toFixed(0)}, Cursed: ${log.cursed_malus}, Combo: ${log.pad_combo_malus}) -> Final: ${log.final_timeout}`;
+                    const logEl = document.createElement('span');
+                    logEl.className = 'text-xs text-slate-500';
+                    logEl.textContent = logDetails;
+                    li.appendChild(logEl);
+                }
+
                 if (entry.applied_multipliers && entry.applied_multipliers.length > 0) {
                     const tagsContainer = document.createElement('div');
                     tagsContainer.className = 'flex gap-1';
