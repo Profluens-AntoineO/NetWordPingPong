@@ -245,6 +245,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function getVowelPowerColor(power) {
+        const percentage = power * 100;
+        if (percentage >= 150) return 'text-green-400';
+        if (percentage >= 100) return 'text-cyan-400';
+        if (percentage >= 50) return 'text-blue-400';
+        if (percentage > 0) return 'text-slate-400';
+        return 'text-red-600';
+    }
+
     function updateVowelPowerDisplay(playerVowelPowers) {
         if (!vowelPowerDisplayEl || !myIdentifier || !playerVowelPowers[myIdentifier]) return;
         const myVowelPower = playerVowelPowers[myIdentifier];
@@ -252,20 +261,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const vowels = ['a', 'e', 'i', 'o', 'u', 'y'];
         vowels.forEach(vowel => {
             const power = myVowelPower[vowel] || 0;
+            const colorClass = getVowelPowerColor(power);
             const div = document.createElement('div');
             div.className = 'p-2 rounded-md bg-slate-800/50';
-            div.innerHTML = `<div class="text-2xl font-bold text-cyan-400">${vowel.toUpperCase()}</div><div class="text-sm text-slate-400">${(power * 100).toFixed(0)}%</div>`;
+            div.innerHTML = `<div class="text-2xl font-bold ${colorClass}">${vowel.toUpperCase()}</div><div class="text-sm ${colorClass}">${(power * 100).toFixed(0)}%</div>`;
             vowelPowerDisplayEl.appendChild(div);
         });
     }
 
     function updateCursedLettersDisplay(cursedLetters) {
-        if (!cursedLettersDisplayEl) return;
-        cursedLettersDisplayEl.innerHTML = '';
-        if (cursedLetters.length === 0) {
-            cursedLettersDisplayEl.innerHTML = '<span>Aucune lettre maudite.</span>';
+        const section = cursedLettersDisplayEl.parentElement;
+        if (!cursedLettersDisplayEl || !section) return;
+        if (!cursedLetters || cursedLetters.length === 0) {
+            section.classList.add('hidden');
             return;
         }
+        section.classList.remove('hidden');
+        cursedLettersDisplayEl.innerHTML = '';
         cursedLetters.forEach(letter => {
             const div = document.createElement('div');
             div.className = `p-2 rounded-md flex items-center gap-2 bg-red-900`;
@@ -275,12 +287,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateDeadLettersDisplay(deadLetters) {
-        if (!deadLettersDisplayEl) return;
-        deadLettersDisplayEl.innerHTML = '';
-        if (deadLetters.length === 0) {
-            deadLettersDisplayEl.innerHTML = '<span>Aucune lettre morte.</span>';
+        const section = deadLettersDisplayEl.parentElement;
+        if (!deadLettersDisplayEl || !section) return;
+        if (!deadLetters || deadLetters.length === 0) {
+            section.classList.add('hidden');
             return;
         }
+        section.classList.remove('hidden');
+        deadLettersDisplayEl.innerHTML = '';
         deadLetters.forEach(letter => {
             const div = document.createElement('div');
             div.className = `p-2 rounded-md flex items-center gap-2 bg-black`;
@@ -290,12 +304,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateInabilityDisplay(inabilities) {
-        if (!inabilityDisplayEl) return;
-        inabilityDisplayEl.innerHTML = '';
+        const section = inabilityDisplayEl.parentElement;
+        if (!inabilityDisplayEl || !section) return;
         if (!inabilities || inabilities.length === 0) {
-            inabilityDisplayEl.innerHTML = '<span>Aucune inhabilité.</span>';
+            section.classList.add('hidden');
             return;
         }
+        section.classList.remove('hidden');
+        inabilityDisplayEl.innerHTML = '';
         inabilities.forEach(letter => {
             const div = document.createElement('div');
             div.className = `p-2 rounded-md flex items-center gap-2 bg-yellow-900`;
@@ -305,12 +321,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateMissionsDisplay(missions) {
-        if (!missionsDisplayEl) return;
-        missionsDisplayEl.innerHTML = '';
+        const section = missionsDisplayEl.parentElement;
+        if (!missionsDisplayEl || !section) return;
         if (!missions || missions.length === 0) {
-            missionsDisplayEl.innerHTML = '<span>Aucune mission.</span>';
+            section.classList.add('hidden');
             return;
         }
+        section.classList.remove('hidden');
+        missionsDisplayEl.innerHTML = '';
         missions.forEach(mission => {
             const div = document.createElement('div');
             const progressValue = mission.current_step || 0;

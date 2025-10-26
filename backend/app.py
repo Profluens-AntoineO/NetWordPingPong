@@ -542,6 +542,7 @@ def start_game_logic(background_tasks: BackgroundTasks):
         game_state["player_inabilities"] = {p_id: [] for p_id in ready_players}
         game_state["letter_curse_counts"] = {}
         select_initial_missions()
+        background_tasks.add_task(manager.broadcast_state)
 
         first_player_identifier = sorted(ready_players)[0]
         start_word = random.choice('abcdefghijklmnopqrstuvwxyz')
