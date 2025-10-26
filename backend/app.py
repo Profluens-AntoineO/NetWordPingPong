@@ -44,6 +44,7 @@ VOWELS = "aeiouy"
 VOWEL_POWER_RECHARGE_RATE = 0.25
 MAX_VOWEL_POWER = 2.0
 CURSE_THRESHOLD = 3
+RARE_LETTERS = ['k', 'w', 'x', 'y', 'z']
 
 PAD_CHARGE_THRESHOLD = 3
 LETTER_TO_PAD = {
@@ -94,6 +95,8 @@ class ConnectionManager:
                 "active_player": game_state.get("active_player"),
                 "active_missions": [m.to_dict() for m in game_state.get("active_missions", [])],
                 "completed_missions": [m.to_dict() for m in game_state.get("completed_missions", [])],
+                "scramble_ui_for_player": game_state.get("scramble_ui_for_player"),
+                "forced_letter": game_state.get("forced_letter"),
             }
         message = json.dumps(full_state)
         for connection in list(self.active_connections):
@@ -175,6 +178,8 @@ class BallPayload(BaseModel):
     incomingTurnCounts: Dict[str, int]
     incomingReadyPlayers: List[str]
     incomingHistory: List[HistoryEntry]
+    scramble_ui_for_player: Optional[str] = None
+    forced_letter: Optional[str] = None
 
 class PassBallPayload(BaseModel):
     newWord: str
@@ -215,9 +220,110 @@ def progress_mur_de_consonnes(mission: "Mission", player_id: str, new_letter: st
     else:
         mission.current_step = 0
 
+def trigger_echo_parfait(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    history = trigger_data["history"]
+    if len(history) < 2: return False
+    return history[-1].word[-1] == history[-2].word[-1]
+
+async def effect_echo_parfait(current_player_id: str, background_tasks: BackgroundTasks):
+    logging.info(f"Mission triggered: Écho Parfait by {current_player_id}")
+    # This effect is handled in pass_ball by re-assigning the turn to the opponent
+
+def progress_echo_parfait(mission: "Mission", player_id: str, new_letter: str):
+    pass # No progress, instant trigger
+
+def trigger_progression_alphabetique(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    new_word = trigger_data["new_word"]
+    if len(new_word) < 2: return False
+    return ord(new_word[-1]) == ord(new_word[-2]) + 1
+
+async def effect_progression_alphabetique(current_player_id: str, background_tasks: BackgroundTasks):
+    logging.info(f"Mission triggered: Progression Alphabétique by {current_player_id}")
+    opponent_id = [p for p in game_state["players"] if p != current_player_id][0]
+    game_state["scramble_ui_for_player"] = opponent_id
+
+def progress_progression_alphabetique(mission: "Mission", player_id: str, new_letter: str):
+    pass
+
+def trigger_symetrie_inversee(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    new_word = trigger_data["new_word"]
+    return len(new_word) > 1 and new_word == new_word[::-1]
+
+async def effect_symetrie_inversee(current_player_id: str, background_tasks: BackgroundTasks):
+    logging.info(f"Mission triggered: Symétrie Inversée by {current_player_id}")
+    # Effect handled in pass_ball
+
+def progress_symetrie_inversee(mission: "Mission", player_id: str, new_letter: str):
+    pass
+
+def trigger_frappe_eclair(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    return mission.current_step >= mission.goal
+
+async def effect_frappe_eclair(current_player_id: str, background_tasks: BackgroundTasks):
+    logging.info(f"Mission triggered: Frappe Éclair by {current_player_id}")
+    game_state["opponent_speed_multiplier"][current_player_id] = 1.2
+
+def progress_frappe_eclair(mission: "Mission", player_id: str, new_letter: str):
+    response_time = game_state["history"][-1].response_time_ms
+    timeout = game_state["player_max_timeouts"].get(player_id, BASE_TIMEOUT_MS)
+    if response_time < timeout * 0.25:
+        mission.current_step += 1
+    else:
+        mission.current_step = 0
+
+def trigger_au_bord_du_precipice(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    response_time = trigger_data["response_time_ms"]
+    timeout = trigger_data["timeout_ms"]
+    return response_time > timeout * 0.9
+
+async def effect_au_bord_du_precipice(current_player_id: str, background_tasks: BackgroundTasks):
+    logging.info(f"Mission triggered: Au Bord du Précipice by {current_player_id}")
+    game_state["player_max_timeouts"][current_player_id] = MAX_TIMEOUT_MS
+
+def progress_au_bord_du_precipice(mission: "Mission", player_id: str, new_letter: str):
+    pass
+
+def trigger_pression_constante(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    return len(trigger_data["history"]) % 10 == 0
+
+async def effect_pression_constante(current_player_id: str, background_tasks: BackgroundTasks):
+    logging.info(f"Mission triggered: Pression Constante")
+    game_state["base_timeout_modifier"] = 0.5
+
+def progress_pression_constante(mission: "Mission", player_id: str, new_letter: str):
+    pass
+
+def trigger_coup_du_dictionnaire(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    return trigger_data["new_letter"] in RARE_LETTERS
+
+async def effect_coup_du_dictionnaire(current_player_id: str, background_tasks: BackgroundTasks):
+    logging.info(f"Mission triggered: Le Coup du Dictionnaire by {current_player_id}")
+    # Penalty handled in pass_ball of the opponent
+
+def progress_coup_du_dictionnaire(mission: "Mission", player_id: str, new_letter: str):
+    pass
+
+def trigger_union_forcee(mission: "Mission", trigger_data: Dict[str, Any]) -> bool:
+    return trigger_data["new_letter"] == 'q'
+
+async def effect_union_forcee(current_player_id: str, background_tasks: BackgroundTasks):
+    logging.info(f"Mission triggered: Union Forcée by {current_player_id}")
+    game_state["forced_letter"] = 'u'
+
+def progress_union_forcee(mission: "Mission", player_id: str, new_letter: str):
+    pass
+
 ALL_MISSIONS = [
     Mission("suite_harmonique", "Suite Harmonique", "Jouer 3 voyelles consécutives. Réduit le temps du prochain adversaire de 30%.", goal=3, trigger_func=trigger_suite_harmonique, effect_func=effect_suite_harmonique, progress_func=progress_suite_harmonique),
     Mission("mur_de_consonnes", "Mur de Consonnes", "Jouer 4 consonnes consécutives. Augmente votre temps pour le prochain tour de 50%.", goal=4, trigger_func=trigger_mur_de_consonnes, effect_func=effect_mur_de_consonnes, progress_func=progress_mur_de_consonnes),
+    Mission("echo_parfait", "Écho Parfait", "Jouer la même lettre que l'adversaire. Renvoie la balle instantanément.", goal=1, trigger_func=trigger_echo_parfait, effect_func=effect_echo_parfait, progress_func=progress_echo_parfait),
+    Mission("progression_alphabetique", "Progression Alphabétique", "Jouer une lettre qui suit la précédente dans l'alphabet. Brouille le clavier de l'adversaire.", goal=1, trigger_func=trigger_progression_alphabetique, effect_func=effect_progression_alphabetique, progress_func=progress_progression_alphabetique),
+    Mission("symetrie_inversee", "Symétrie Inversée", "Compléter un palindrome. Annule le dernier coup de l'adversaire.", goal=1, trigger_func=trigger_symetrie_inversee, effect_func=effect_symetrie_inversee, progress_func=progress_symetrie_inversee),
+    Mission("frappe_eclair", "Frappe Éclair", "Jouer 3 fois de suite en moins de 25% du temps. Accélère le temps de l'adversaire.", goal=3, trigger_func=trigger_frappe_eclair, effect_func=effect_frappe_eclair, progress_func=progress_frappe_eclair),
+    Mission("au_bord_du_precipice", "Au Bord du Précipice", "Jouer avec moins de 10% de temps restant. Récupère tout votre temps.", goal=1, trigger_func=trigger_au_bord_du_precipice, effect_func=effect_au_bord_du_precipice, progress_func=progress_au_bord_du_precipice),
+    Mission("pression_constante", "Pression Constante", "Échanger la balle 10 fois. Réduit le temps de base de 50%.", goal=1, trigger_func=trigger_pression_constante, effect_func=effect_pression_constante, progress_func=progress_pression_constante),
+    Mission("coup_du_dictionnaire", "Le Coup du Dictionnaire", "Jouer une lettre rare (K, W, X, Y, Z). Pénalise l'adversaire s'il ne joue pas une voyelle.", goal=1, trigger_func=trigger_coup_du_dictionnaire, effect_func=effect_coup_du_dictionnaire, progress_func=progress_coup_du_dictionnaire),
+    Mission("union_forcee", "Union Forcée", "Jouer la lettre 'Q'. Force l'adversaire à jouer 'U'.", goal=1, trigger_func=trigger_union_forcee, effect_func=effect_union_forcee, progress_func=progress_union_forcee),
 ]
 
 def find_mission_template_by_id(mission_id: str) -> Optional[Mission]:
@@ -228,23 +334,19 @@ def find_mission_template_by_id(mission_id: str) -> Optional[Mission]:
 
 def select_initial_missions():
     with state_lock:
-        game_state["mission_pool"] = list(ALL_MISSIONS)
-        game_state["active_missions"] = []
-        missions_to_activate = random.sample(game_state["mission_pool"], min(3, len(game_state["mission_pool"])))
-        for mission_template in missions_to_activate:
-            active_mission = mission_template.copy()
-            game_state["active_missions"].append(active_mission)
-            game_state["mission_pool"].remove(mission_template)
+        game_state["active_missions"] = [m.copy() for m in random.sample(ALL_MISSIONS, min(3, len(ALL_MISSIONS)))]
 
 def replace_triggered_mission(triggered_mission: Mission):
     with state_lock:
         game_state["active_missions"] = [m for m in game_state["active_missions"] if m.id != triggered_mission.id]
         game_state["completed_missions"].append(triggered_mission)
-        if game_state["mission_pool"]:
-            new_mission_template = random.choice(game_state["mission_pool"])
-            new_active_mission = new_mission_template.copy()
-            game_state["active_missions"].append(new_active_mission)
-            game_state["mission_pool"].remove(new_mission_template)
+
+        current_mission_ids = {m.id for m in game_state["active_missions"]}.union({m.id for m in game_state["completed_missions"]})
+        available_missions = [m for m in ALL_MISSIONS if m.id not in current_mission_ids]
+
+        if available_missions:
+            new_mission_template = random.choice(available_missions)
+            game_state["active_missions"].append(new_mission_template.copy())
 
 # --- State Reset Functions ---
 def get_new_phone_pad():
@@ -408,7 +510,6 @@ def on_startup():
         game_state["active_player"] = None
         game_state["active_missions"] = []
         game_state["completed_missions"] = []
-        game_state["mission_pool"] = []
         game_state["forced_letter"] = None
         game_state["scramble_ui_for_player"] = None
         game_state["opponent_speed_multiplier"] = {}
@@ -558,29 +659,40 @@ async def initiate_rematch_logic(background_tasks: BackgroundTasks):
 
     await manager.broadcast_state()
 
-async def end_turn(background_tasks: BackgroundTasks, current_player_id: str, timeout_for_next_player: int, new_inabilities: List[str] = [], applied_modifiers: List[str] = []):
+async def end_turn(background_tasks: BackgroundTasks, current_player_id: str, timeout_for_next_player: int, new_inabilities: List[str] = [], applied_modifiers: List[str] = [], ricochet: bool = False, mirror_move: bool = False):
     with state_lock:
-        other_players = [p_id for p_id in game_state.get("players", []) if p_id != current_player_id]
-        next_player_identifier = None
-
-        if "computer" in other_players:
-            next_player_identifier = "computer"
-        elif other_players:
-            candidates = list(other_players)
-            while candidates:
-                min_turns = min(game_state["turn_counts"].get(p, 0) for p in candidates)
-                eligible_players = [p for p in candidates if game_state["turn_counts"].get(p, 0) == min_turns]
-                potential_next_player = random.choice(eligible_players)
-                try:
-                    requests.get(f"http://{potential_next_player}/health", timeout=0.5)
-                    next_player_identifier = potential_next_player
-                    break
-                except requests.RequestException:
-                    candidates.remove(potential_next_player)
-            if not next_player_identifier:
+        if mirror_move:
+            if len(game_state["history"]) > 1:
+                game_state["history"].pop()
+                last_word = game_state["history"][-1].word
+                game_state["current_word"] = last_word
+                next_player_identifier = game_state["history"][-1].player
+            else: # Should not happen in a real game
                 next_player_identifier = current_player_id
+        elif ricochet:
+            next_player_identifier = [p for p in game_state["players"] if p != current_player_id][0]
         else:
-            next_player_identifier = current_player_id
+            other_players = [p_id for p_id in game_state.get("players", []) if p_id != current_player_id]
+            next_player_identifier = None
+
+            if "computer" in other_players:
+                next_player_identifier = "computer"
+            elif other_players:
+                candidates = list(other_players)
+                while candidates:
+                    min_turns = min(game_state["turn_counts"].get(p, 0) for p in candidates)
+                    eligible_players = [p for p in candidates if game_state["turn_counts"].get(p, 0) == min_turns]
+                    potential_next_player = random.choice(eligible_players)
+                    try:
+                        requests.get(f"http://{potential_next_player}/health", timeout=0.5)
+                        next_player_identifier = potential_next_player
+                        break
+                    except requests.RequestException:
+                        candidates.remove(potential_next_player)
+                if not next_player_identifier:
+                    next_player_identifier = current_player_id
+            else:
+                next_player_identifier = current_player_id
 
         game_state["turn_counts"].setdefault(next_player_identifier, 0)
         game_state["turn_counts"][next_player_identifier] += 1
@@ -613,7 +725,9 @@ async def end_turn(background_tasks: BackgroundTasks, current_player_id: str, ti
             incomingPlayers=game_state["players"], 
             incomingTurnCounts=game_state["turn_counts"],
             incomingReadyPlayers=game_state["ready_players"], 
-            incomingHistory=game_state["history"]
+            incomingHistory=game_state["history"],
+            scramble_ui_for_player=game_state.get("scramble_ui_for_player"),
+            forced_letter=game_state.get("forced_letter"),
         )
         
         reset_local_game_state()
@@ -835,7 +949,9 @@ async def receive_ball(payload: BallPayload):
             "history": payload.incomingHistory,
             "turn_start_time": time.time(),
             "current_turn_timeout_ms": payload.timeout_ms,
-            "active_player": game_state["own_identifier"]
+            "active_player": game_state["own_identifier"],
+            "scramble_ui_for_player": payload.scramble_ui_for_player,
+            "forced_letter": payload.forced_letter,
         })
         
         game_state["game_timer"] = threading.Timer(payload.timeout_ms / 1000.0, lambda: asyncio.run(handle_loss()))
@@ -860,6 +976,10 @@ async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks)
             game_state["game_timer"].cancel()
 
         new_letter = payload.newWord[-1]
+
+        if game_state.get("forced_letter") and new_letter != game_state["forced_letter"]:
+            raise HTTPException(status_code=400, detail=f"Forced to play '{game_state['forced_letter']}'.")
+        game_state["forced_letter"] = None
 
         if new_letter in game_state.get("dead_letters", []):
             logging.info(f"Player {my_id} played a dead letter '{new_letter}' and loses instantly.")
@@ -925,6 +1045,8 @@ async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks)
         for mission in game_state["active_missions"]:
             mission.progress_func(mission, my_id, new_letter)
 
+        ricochet = False
+        mirror_move = False
         triggered_missions = []
         for mission in list(game_state["active_missions"]):
             trigger_data = {
@@ -943,6 +1065,8 @@ async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks)
             await mission.effect_func(my_id, background_tasks)
             replace_triggered_mission(mission)
             modifiers.append(f"mission:{mission.name}")
+            if mission.id == "echo_parfait": ricochet = True
+            if mission.id == "symetrie_inversee": mirror_move = True
 
         if game_state["opponent_speed_multiplier"].get(my_id):
             next_timeout = int(next_timeout / game_state["opponent_speed_multiplier"][my_id])
@@ -950,7 +1074,7 @@ async def pass_ball(payload: PassBallPayload, background_tasks: BackgroundTasks)
 
         next_timeout = int(next_timeout * game_state["base_timeout_modifier"])
 
-        await end_turn(background_tasks, my_id, next_timeout, applied_modifiers=modifiers)
+        await end_turn(background_tasks, my_id, next_timeout, applied_modifiers=modifiers, ricochet=ricochet, mirror_move=mirror_move)
 
     return {"message": "Ball passed successfully."}
 
