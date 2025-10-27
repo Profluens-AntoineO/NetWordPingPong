@@ -22,6 +22,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const inabilityDisplayEl = document.getElementById('inability-display');
     const missionsDisplayEl = document.getElementById('missions-display');
 
+    const gameButton = document.getElementById('game-button');
+    const historyButton = document.getElementById('history-button');
+    const archivesButton = document.getElementById('archives-button');
+    const gamePanel = document.getElementById('panel-game');
+    const historyPanel = document.getElementById('panel-history');
+    const archivesPanel = document.getElementById('panel-archives');
+
     let localCurrentWord = null;
     let gameTimer = null;
     let countdownInterval = null;
@@ -133,8 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateHistoryList(history) {
-        const historyList = document.getElementById('panel-history').querySelector('ul');
-        historyList.innerHTML = '';
+        historyListEl.innerHTML = '';
         if (history && history.length > 0) {
             history.forEach(entry => {
                 const li = document.createElement('li');
@@ -145,7 +151,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 if (entry.timeout_log) {
                     const log = entry.timeout_log;
-                    const logDetails = `(Base: ${log.base_timeout}, Speed: ${log.speed_bonus.toFixed(0)}, Vowel: ${log.vowel_bonus.toFixed(0)}, Cursed: ${log.cursed_malus}, Combo: ${log.pad_combo_malus}) -> Final: ${log.final_timeout}`;
+                    const logDetails = `(Base: ${log.base_timeout}, Speed: ${log.speed_multiplier.toFixed(2)}x, Vowel: ${log.vowel_multiplier.toFixed(2)}x, Cursed: ${log.cursed_multiplier.toFixed(2)}x, Combo: ${log.pad_combo_multiplier.toFixed(2)}x) -> Final: ${log.final_timeout}`;
                     const logEl = document.createElement('span');
                     logEl.className = 'text-xs text-slate-500';
                     logEl.textContent = logDetails;
@@ -163,18 +169,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                     li.appendChild(tagsContainer);
                 }
-                historyList.appendChild(li);
+                historyListEl.appendChild(li);
             });
-            historyList.scrollTop = historyList.scrollHeight;
+            historyListEl.scrollTop = historyListEl.scrollHeight;
         } else {
-            historyList.innerHTML = '<li>En attente du premier coup...</li>';
+            historyListEl.innerHTML = '<li>En attente du premier coup...</li>';
         }
     }
 
     function updateArchiveList(archive) {
-        const archiveList = document.getElementById('panel-archives').querySelector('div');
-        if (!archiveList) return;
-        archiveList.innerHTML = '';
+        archiveListEl.innerHTML = '';
         if (archive && archive.length > 0) {
             archive.slice().reverse().forEach((gameHistory, index) => {
                 const gameContainer = document.createElement('div');
@@ -190,10 +194,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     gameUl.appendChild(li);
                 });
                 gameContainer.appendChild(gameUl);
-                archiveList.appendChild(gameContainer);
+                archiveListEl.appendChild(gameContainer);
             });
         } else {
-            archiveList.innerHTML = '<span>Aucune partie archivée.</span>';
+            archiveListEl.innerHTML = '<span>Aucune partie archivée.</span>';
         }
     }
 
@@ -567,26 +571,31 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     });
 
-    // Tab switching logic
-    const tabs = ['game', 'history', 'archives'];
-    tabs.forEach(tabId => {
-        const tabButton = document.getElementById(`tab-${tabId}`);
-        if (tabButton) {
-            tabButton.addEventListener('click', () => {
-                // Hide all panels
-                tabs.forEach(id => {
-                    const panel = document.getElementById(`panel-${id}`);
-                    const tab = document.getElementById(`tab-${id}`);
-                    if (panel) panel.classList.add('hidden');
-                    if (tab) tab.classList.remove('active-tab');
-                });
-                // Show the selected panel
-                const selectedPanel = document.getElementById(`panel-${tabId}`);
-                const selectedTab = document.getElementById(`tab-${tabId}`);
-                if (selectedPanel) selectedPanel.classList.remove('hidden');
-                if (selectedTab) selectedTab.classList.add('active-tab');
-            });
-        }
+    gameButton.addEventListener('click', () => {
+        gamePanel.classList.remove('hidden');
+        historyPanel.classList.add('hidden');
+        archivesPanel.classList.add('hidden');
+        gameButton.classList.add('active-nav-button');
+        historyButton.classList.remove('active-nav-button');
+        archivesButton.classList.remove('active-nav-button');
+    });
+
+    historyButton.addEventListener('click', () => {
+        gamePanel.classList.add('hidden');
+        historyPanel.classList.remove('hidden');
+        archivesPanel.classList.add('hidden');
+        gameButton.classList.remove('active-nav-button');
+        historyButton.classList.add('active-nav-button');
+        archivesButton.classList.remove('active-nav-button');
+    });
+
+    archivesButton.addEventListener('click', () => {
+        gamePanel.classList.add('hidden');
+        historyPanel.classList.add('hidden');
+        archivesPanel.classList.remove('hidden');
+        gameButton.classList.remove('active-nav-button');
+        historyButton.classList.remove('active-nav-button');
+        archivesButton.classList.add('active-nav-button');
     });
 
     connect();

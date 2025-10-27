@@ -10,41 +10,32 @@
         body {
             font-family: 'Orbitron', sans-serif;
         }
-        .tab-button {
-            @apply py-3 px-6 text-slate-400 hover:text-white focus:outline-none transition-all duration-300 ease-in-out flex items-center gap-2;
+        .nav-button {
+            @apply py-3 px-6 text-slate-400 hover:text-white border-b-2 border-transparent focus:outline-none transition-colors duration-200 -mb-px;
         }
-        .active-tab {
-            @apply text-cyan-400 border-b-2 border-cyan-400 bg-slate-800/50;
+        .active-nav-button {
+            @apply text-cyan-400 border-cyan-400 bg-slate-800/50;
         }
-        .tab-panel {
-            @apply h-full;
+        .hidden {
+            display: none;
         }
     </style>
 </head>
 <body class="bg-slate-900 text-white font-sans flex items-center justify-center min-h-screen p-4">
 
     <div class="bg-slate-800 p-4 sm:p-6 rounded-2xl shadow-2xl w-full max-w-7xl mx-auto flex flex-col h-full lg:h-auto lg:max-h-[95vh]">
-        <!-- Tab Headers -->
-        <div class="flex border-b border-slate-700">
-            <button id="tab-game" class="tab-button active-tab">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd" /></svg>
-                <span>Jeu</span>
-            </button>
-            <button id="tab-history" class="tab-button">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.414-1.414L11 10.586V6z" clip-rule="evenodd" /></svg>
-                <span>Historique</span>
-            </button>
-            <button id="tab-archives" class="tab-button">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" /><path fill-rule="evenodd" d="M4 5a2 2 0 012-2h8a2 2 0 012 2v10a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h4a1 1 0 100-2H7zm0 4a1 1 0 100 2h4a1 1 0 100-2H7z" clip-rule="evenodd" /></svg>
-                <span>Archives</span>
-            </button>
+        <!-- Navigation Buttons -->
+        <div class="flex justify-center gap-4 border-b border-slate-700">
+            <button id="game-button" class="nav-button active-nav-button">Jeu</button>
+            <button id="history-button" class="nav-button">Historique</button>
+            <button id="archives-button" class="nav-button">Archives</button>
         </div>
 
-        <!-- Tab Content -->
-        <div class="flex-grow min-h-0">
+        <!-- Main Content Area -->
+        <div id="main-content" class="flex-grow py-4 min-h-0">
             <!-- Game Panel -->
-            <div id="panel-game" class="tab-panel flex flex-col lg:flex-row gap-6 py-4">
-                <!-- Colonne de Gauche: Jeu Principal -->
+            <div id="panel-game" class="flex flex-col lg:flex-row gap-6 h-full">
+                <!-- Left Column: Main Game -->
                 <div class="flex-grow flex flex-col lg:w-2/3">
                     <h1 class="text-3xl md:text-4xl font-bold text-cyan-300 mb-2 text-center">NetWord Ping Pong</h1>
                     <div id="status" class="text-slate-400 text-base md:text-lg h-7 mb-2 text-center">Initialisation...</div>
@@ -68,7 +59,7 @@
                         </button>
                     </div>
 
-                    <div class="bg-slate-800/50 p-3 rounded-lg text-left mt-6">
+                    <div id="missions-section" class="bg-slate-800/50 p-3 rounded-lg text-left mt-6">
                         <h2 class="text-lg font-semibold text-cyan-400 mb-2">Missions Actives</h2>
                         <div id="missions-display" class="flex flex-col gap-2"></div>
                     </div>
@@ -78,7 +69,7 @@
                     </div>
                 </div>
 
-                <!-- Colonne de Droite (dans le tab Jeu): Infos -->
+                <!-- Right Column: Info -->
                 <div class="w-full lg:w-1/3 lg:max-w-md flex flex-col gap-4">
                     <div class="bg-slate-800/50 p-3 rounded-lg text-left">
                         <h2 class="text-lg font-semibold text-cyan-400 mb-2">Phone Pad</h2>
@@ -88,15 +79,15 @@
                         <h2 class="text-lg font-semibold text-cyan-400 mb-2">Puissance Voyelles</h2>
                         <div id="vowel-power-display" class="grid grid-cols-6 gap-2 text-center"></div>
                     </div>
-                    <div class="bg-slate-800/50 p-3 rounded-lg text-left">
+                    <div id="cursed-letters-section" class="bg-slate-800/50 p-3 rounded-lg text-left">
                         <h2 class="text-lg font-semibold text-cyan-400 mb-2">Lettres Maudites</h2>
                         <div id="cursed-letters-display" class="flex flex-wrap gap-2"></div>
                     </div>
-                    <div class="bg-slate-800/50 p-3 rounded-lg text-left">
+                    <div id="dead-letters-section" class="bg-slate-800/50 p-3 rounded-lg text-left">
                         <h2 class="text-lg font-semibold text-red-500 mb-2">Lettres Mortes</h2>
                         <div id="dead-letters-display" class="flex flex-wrap gap-2"></div>
                     </div>
-                    <div class="bg-slate-800/50 p-3 rounded-lg text-left">
+                    <div id="inability-section" class="bg-slate-800/50 p-3 rounded-lg text-left">
                         <h2 class="text-lg font-semibold text-yellow-500 mb-2">Mes Inabilités</h2>
                         <div id="inability-display" class="flex flex-wrap gap-2"></div>
                     </div>
@@ -104,11 +95,14 @@
             </div>
 
             <!-- History Panel -->
-            <div id="panel-history" class="tab-panel hidden p-3 h-full overflow-y-auto">
-                <ul id="history-list" class="text-slate-400 space-y-1 text-sm pr-2"><li>En attente du début de la partie...</li></ul>
+            <div id="panel-history" class="hidden h-full overflow-y-auto">
+                <h2 class="text-2xl font-bold text-cyan-300 mb-4">Historique de la Partie</h2>
+                <ul id="history-list" class="text-slate-400 space-y-2 text-sm pr-2"><li>En attente du début de la partie...</li></ul>
             </div>
+
             <!-- Archives Panel -->
-            <div id="panel-archives" class="tab-panel hidden p-3 h-full overflow-y-auto">
+            <div id="panel-archives" class="hidden h-full overflow-y-auto">
+                 <h2 class="text-2xl font-bold text-cyan-300 mb-4">Archives des Parties</h2>
                  <div id="archive-list" class="text-slate-400 space-y-4 text-sm pr-2"><span>Aucune partie archivée.</span></div>
             </div>
         </div>

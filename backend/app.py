@@ -134,10 +134,10 @@ class Mission:
 # --- Pydantic Models ---
 class TimeCalculationLog(BaseModel):
     base_timeout: int
-    speed_bonus: float
-    vowel_bonus: float
-    cursed_malus: bool
-    pad_combo_malus: bool
+    speed_multiplier: float
+    vowel_multiplier: float
+    cursed_multiplier: float
+    pad_combo_multiplier: float
     final_timeout: int
 
 class HistoryEntry(BaseModel):
@@ -469,17 +469,17 @@ def discover_peers():
     asyncio.run(manager.broadcast_state())
 
 def calculate_next_timeout(response_time_ms: int, new_word: str, player_vowel_power: Dict[str, float], cursed_malus: bool = False, pad_combo_malus: bool = False) -> (int, List[str], Dict[str, float], TimeCalculationLog):
-    speed_bonus = (5000 - response_time_ms) * 1.5
+    speed_multiplier = 1.0 + (1 - response_time_ms / BASE_TIMEOUT_MS)
     new_letter = new_word[-1]
-    vowel_bonus = 0
+    vowel_multiplier = 1.0
     applied_multipliers = []
     new_player_vowel_power = player_vowel_power.copy()
 
     if new_letter in VOWELS:
         power_before_use = new_player_vowel_power.get(new_letter, 1.0)
-        vowel_bonus = -7500 * power_before_use # Negative bonus for opponent
+        vowel_multiplier = 1.0 - (0.25 * power_before_use)
         new_player_vowel_power[new_letter] = power_before_use / 2
-        if vowel_bonus < 0: applied_multipliers.append(f"voyelle ({power_before_use:.0%})")
+        if vowel_multiplier < 1.0: applied_multipliers.append(f"voyelle ({power_before_use:.0%})")
     else:
         recharged = False
         for v in VOWELS:
@@ -488,19 +488,22 @@ def calculate_next_timeout(response_time_ms: int, new_word: str, player_vowel_po
                 new_player_vowel_power[v] = min(MAX_VOWEL_POWER, new_player_vowel_power.get(v, 1.0) + VOWEL_POWER_RECHARGE_RATE)
         if recharged: applied_multipliers.append("recharge")
 
-    final_timeout = BASE_TIMEOUT_MS + speed_bonus + vowel_bonus
-    if cursed_malus: final_timeout *= 0.25; applied_multipliers.append("maudite")
-    if pad_combo_malus: final_timeout *= 0.5; applied_multipliers.append("combo #")
-    if speed_bonus > 0: applied_multipliers.append("vitesse")
+    cursed_multiplier = 0.25 if cursed_malus else 1.0
+    pad_combo_multiplier = 0.5 if pad_combo_malus else 1.0
+
+    final_timeout = BASE_TIMEOUT_MS * speed_multiplier * vowel_multiplier * cursed_multiplier * pad_combo_multiplier
+    if cursed_malus: applied_multipliers.append("maudite")
+    if pad_combo_malus: applied_multipliers.append("combo #")
+    if speed_multiplier > 1.0: applied_multipliers.append("vitesse")
 
     final_timeout = max(MIN_TIMEOUT_MS, min(final_timeout, MAX_TIMEOUT_MS))
     
     log = TimeCalculationLog(
         base_timeout=BASE_TIMEOUT_MS,
-        speed_bonus=speed_bonus,
-        vowel_bonus=vowel_bonus,
-        cursed_malus=cursed_malus,
-        pad_combo_malus=pad_combo_malus,
+        speed_multiplier=speed_multiplier,
+        vowel_multiplier=vowel_multiplier,
+        cursed_multiplier=cursed_multiplier,
+        pad_combo_multiplier=pad_combo_multiplier,
         final_timeout=int(final_timeout)
     )
 
